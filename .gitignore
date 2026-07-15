@@ -6,6 +6,7 @@ __pycache__/
 *.egg-info
 dist/
 build/
+.eggs/
 *.egg
 
 # Virtual environments
@@ -18,6 +19,11 @@ env/
 .vscode/
 *.swp
 *.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
 
 # OS
 .DS_Store
