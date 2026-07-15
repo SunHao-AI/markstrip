@@ -41,7 +41,7 @@ class PythonPlugin(LanguagePlugin):
             tokens = list(tokenize.tokenize(
                 iter(content.encode("utf-8").splitlines(True)).__next__
             ))
-        except tokenize.TokenizeError:
+        except tokenize.TokenError:
             return self._fallback_regex_selective(content, config)
 
         for tok in tokens:
@@ -60,9 +60,78 @@ class PythonPlugin(LanguagePlugin):
         return self._rebuild(lines, comment_removals)
 
     def strip_full(self, content: str, config: StripConfig) -> str:
-        """全量注释删除。"""
-        # Task 6 实现
-        return content
+        """全量注释删除：删除所有注释，保留 shebang/TODO 等。
+
+        Args:
+            content: Python 源代码内容。
+            config: 清理配置。
+
+        Returns:
+            清理后的内容。
+        """
+        lines = content.splitlines(keepends=True)
+        comment_removals: list[tuple[int, int, int]] = []
+
+        try:
+            tokens = list(tokenize.tokenize(
+                iter(content.encode("utf-8").splitlines(True)).__next__
+            ))
+        except tokenize.TokenError:
+            # 语法错误时无法处理，直接返回原内容
+            return content
+
+        for tok in tokens:
+            if tok.type == tokenize.COMMENT:
+                if self._is_preserved_comment(tok, config):
+                    continue
+                # 列号为 0 的注释（整行只有注释）→ 删除整行
+                if tok.start[1] == 0:
+                    comment_removals.append((tok.start[0], 0, -1))
+                else:
+                    # 列级删除：(行号, 起始列, 结束列)
+                    comment_removals.append(
+                        (tok.start[0], tok.start[1], tok.end[1])
+                    )
+
+            if tok.type == tokenize.STRING:
+                if self._is_docstring(tok, tokens):
+                    if not config.preserve_docstrings:
+                        # 删除整个 docstring 的所有行
+                        for line_num in range(tok.start[0], tok.end[0] + 1):
+                            comment_removals.append((line_num, 0, -1))
+
+        return self._rebuild(lines, comment_removals)
+
+    def _is_preserved_comment(
+        self,
+        tok: tokenize.TokenInfo,
+        config: StripConfig,
+    ) -> bool:
+        """判断注释是否应被保留（full 模式）。
+
+        Args:
+            tok: COMMENT token。
+            config: 清理配置。
+
+        Returns:
+            True 表示保留，False 表示删除。
+        """
+        text = tok.string.strip()
+        # 保留 shebang
+        if text.startswith("#!"):
+            return True
+        # 保留编码声明
+        if "coding:" in text or "coding=" in text:
+            return True
+        # 保留 TODO/FIXME
+        if config.preserve_todo and (
+            "TODO" in text or "FIXME" in text
+        ):
+            return True
+        # 保留类型注释
+        if text.startswith("# type:"):
+            return True
+        return False
 
     def _has_marker(self, comment_text: str, config: StripConfig) -> bool:
         """检查注释是否包含标记。
