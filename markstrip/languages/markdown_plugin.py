@@ -1,4 +1,3 @@
-# markstrip/languages/markdown_plugin.py
 """Markdown 语言插件。"""
 import re
 
@@ -19,6 +18,9 @@ NESTED_BLOCK_RE = re.compile(
     r"\n[ \t]*```\n.*?[ \t]*```\n?",
     re.DOTALL,
 )
+
+# HTML 注释正则：匹配 <!-- ... -->，\n? 移除注释后清理行尾换行
+HTML_COMMENT_RE = re.compile(r"<!--.*?-->\n?", re.DOTALL)
 
 
 class MarkdownPlugin(LanguagePlugin):
@@ -46,11 +48,17 @@ class MarkdownPlugin(LanguagePlugin):
         content = self._process_code_blocks(
             content, config, mode="selective"
         )
+        content = self._process_html_comments(
+            content, config, mode="selective"
+        )
         return content
 
     def strip_full(self, content: str, config: StripConfig) -> str:
         """全量注释删除。"""
         content = self._process_code_blocks(
+            content, config, mode="full"
+        )
+        content = self._process_html_comments(
             content, config, mode="full"
         )
         return content
@@ -105,6 +113,33 @@ class MarkdownPlugin(LanguagePlugin):
             清理后的代码内容。
         """
         return NESTED_BLOCK_RE.sub("", code)
+
+    def _process_html_comments(
+        self,
+        content: str,
+        config: StripConfig,
+        mode: str,
+    ) -> str:
+        """处理 HTML 注释。
+
+        Args:
+            content: Markdown 内容。
+            config: 清理配置。
+            mode: "selective" 仅删除含标记的，"full" 删除所有。
+
+        Returns:
+            处理后的内容。
+        """
+        if mode == "full":
+            return HTML_COMMENT_RE.sub("", content)
+
+        def filter_comment(match: re.Match) -> str:
+            comment = match.group(0)
+            if config.line_marker in comment:
+                return ""
+            return comment
+
+        return HTML_COMMENT_RE.sub(filter_comment, content)
 
     def _fallback_strip(
         self,
