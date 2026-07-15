@@ -1,4 +1,5 @@
 """Python 语言插件。"""
+import ast
 import re
 import tokenize
 
@@ -50,6 +51,11 @@ class PythonPlugin(LanguagePlugin):
                         (tok.start[0], tok.start[1], tok.end[1])
                     )
 
+            if tok.type == tokenize.STRING:
+                if self._is_docstring(tok, tokens):
+                    doc_removals = self._process_docstring(tok, config, lines)
+                    comment_removals.extend(doc_removals)
+
         # 行级重组：删除标记注释文本，保留非注释代码
         return self._rebuild(lines, comment_removals)
 
@@ -76,6 +82,105 @@ class PythonPlugin(LanguagePlugin):
                 return True
         return False
 
+    def _is_docstring(
+        self,
+        tok: tokenize.TokenInfo,
+        tokens: list[tokenize.TokenInfo],
+    ) -> bool:
+        """判断 STRING token 是否为 docstring。
+
+        docstring 是模块、类或函数体的首条语句。
+
+        Args:
+            tok: 待判断的 token。
+            tokens: 完整 token 列表。
+
+        Returns:
+            是否为 docstring。
+        """
+        # 简化判断：三引号字符串且前一个非空 token 是 NEWLINE/INDENT/DEDENT
+        # 或位于文件开头
+        idx = tokens.index(tok)
+        # 向前查找第一个非 NL/NEWLINE token
+        prev_idx = idx - 1
+        while prev_idx >= 0 and tokens[prev_idx].type in (
+            tokenize.NL,
+            tokenize.NEWLINE,
+        ):
+            prev_idx -= 1
+
+        if prev_idx < 0:
+            # 文件开头，是模块 docstring
+            return True
+
+        prev = tokens[prev_idx]
+        # 前一个是 INDENT 或 DEDENT → 可能是函数/类体首语句
+        if prev.type in (tokenize.INDENT, tokenize.DEDENT):
+            return True
+        # 前一个是冒号 → 函数/类定义后的首语句
+        if prev.type == tokenize.OP and prev.string == ":":
+            return True
+        # 简化：多行字符串（含换行）也可能是 docstring
+        if "\n" in tok.string:
+            return True
+        return False
+
+    def _process_docstring(
+        self,
+        tok: tokenize.TokenInfo,
+        config: StripConfig,
+        lines: list[str],
+    ) -> list[tuple[int, int, int]]:
+        """处理单个 docstring，返回需删除的位置。
+
+        Args:
+            tok: docstring 的 STRING token。
+            config: 清理配置。
+            lines: 原始行列表。
+
+        Returns:
+            需要删除的 (line_num, start_col, end_col) 列表。
+            end_col=-1 表示删除整行（含换行符）。
+        """
+        try:
+            content = ast.literal_eval(tok.string)
+        except (ValueError, SyntaxError):
+            return []
+
+        doc_lines = content.split("\n")
+
+        # 检查 @internal-docstring 标记（整体删除）
+        # 扫描所有行以支持标记不在首行的情况
+        has_whole_marker = any(
+            line.strip().startswith(config.docstring_marker)
+            for line in doc_lines
+        )
+        if has_whole_marker:
+            # 删除整个 docstring 的所有行
+            removals = []
+            for line_num in range(tok.start[0], tok.end[0] + 1):
+                removals.append((line_num, 0, -1))  # -1 = 删除整行
+            return removals
+
+        # 逐行检查 @internal 标记
+        markers = [config.line_marker] + config.custom_markers
+        removals: list[tuple[int, int, int]] = []
+        for i, line in enumerate(doc_lines):
+            stripped = line.strip()
+            for marker in markers:
+                if stripped.startswith(marker):
+                    # 映射到源文件行号，清空该行内容（保留空行）
+                    source_line = tok.start[0] + i
+                    # 获取该行的长度（不含换行符）
+                    if source_line - 1 < len(lines):
+                        line_content = lines[source_line - 1].rstrip("\r\n")
+                        removals.append(
+                            (source_line, 0, len(line_content))
+                        )
+                    break
+
+        return removals
+
     def _rebuild(
         self,
         lines: list[str],
@@ -87,6 +192,7 @@ class PythonPlugin(LanguagePlugin):
             lines: 原始行列表（splitlines(keepends=True)）。
             comment_removals: 需要删除的注释信息列表
                 (行号, 起始列, 结束列)，1-based 行号，0-based 列。
+                end_col=-1 表示删除整行（含换行符）。
 
         Returns:
             重组后的内容。
@@ -96,13 +202,22 @@ class PythonPlugin(LanguagePlugin):
 
         # 按行号分组
         removals_by_line: dict[int, list[tuple[int, int]]] = {}
+        full_line_removals: set[int] = set()
+
         for line_num, start_col, end_col in comment_removals:
-            removals_by_line.setdefault(line_num, []).append(
-                (start_col, end_col)
-            )
+            if end_col == -1:
+                full_line_removals.add(line_num)
+            else:
+                removals_by_line.setdefault(line_num, []).append(
+                    (start_col, end_col)
+                )
 
         result = []
         for i, line in enumerate(lines, start=1):
+            if i in full_line_removals:
+                # 删除整行（含换行符）
+                continue
+
             if i not in removals_by_line:
                 result.append(line)
                 continue
