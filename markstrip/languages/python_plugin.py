@@ -328,6 +328,9 @@ class PythonPlugin(LanguagePlugin):
     ) -> str:
         """tokenize 失败时的正则回退。
 
+        注意：正则无法区分字符串中的 # 和注释 #，此为已知限制。
+        仅在 tokenize 失败（语法错误）时触发。
+
         Args:
             content: 源代码内容。
             config: 清理配置。
@@ -335,6 +338,15 @@ class PythonPlugin(LanguagePlugin):
         Returns:
             清理后的内容。
         """
-        marker = re.escape(config.line_marker)
-        pattern = rf"^\s*#\s*{marker}.*$\n?"
-        return re.sub(pattern, "", content, flags=re.MULTILINE)
+        markers = [config.line_marker] + config.custom_markers
+        marker_alt = "|".join(re.escape(m) for m in markers)
+
+        # 第一遍：删除整行标记注释（含换行符）
+        full_pattern = rf"^\s*#\s*(?:{marker_alt}).*$\n?"
+        content = re.sub(full_pattern, "", content, flags=re.MULTILINE)
+
+        # 第二遍：删除行内标记注释（仅注释部分，保留前面的代码）
+        inline_pattern = rf"\s*#\s*(?:{marker_alt}).*$"
+        content = re.sub(inline_pattern, "", content, flags=re.MULTILINE)
+
+        return content
