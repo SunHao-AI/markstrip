@@ -1,41 +1,141 @@
 # markstrip
 
-标记式选择性注释过滤库。
+标记式选择性注释过滤库 —— 基于标记自动清理源代码中的指定注释，保留其他注释不变。
 
-markstrip 是一个 Python 库 + CLI 工具，用于基于标记的选择性注释过滤。在多分支代码管理场景中（如 master 保留完整代码/注释，release 分发给第三方时需隐藏核心设计注释），通过在注释中添加 `@internal` 等标记，markstrip 可自动过滤含标记的注释，保留普通注释不动。
+## 目录
+
+- [项目概述](#项目概述)
+- [核心特性](#核心特性)
+- [安装部署](#安装部署)
+- [快速开始](#快速开始)
+- [标记类型详解](#标记类型详解)
+- [CLI 命令行使用指南](#cli-命令行使用指南)
+- [Python API 使用指南](#python-api-使用指南)
+- [配置参数完整说明](#配置参数完整说明)
+- [Markdown 支持](#markdown-支持)
+- [全量模式（full）保留规则](#全量模式full保留规则)
+- [项目架构](#项目架构)
+- [模块说明](#模块说明)
+- [扩展开发指南](#扩展开发指南)
+- [常见问题（FAQ）](#常见问题faq)
+- [已知限制](#已知限制)
+- [测试](#测试)
+- [后续发展方向](#后续发展方向)
+- [License](#license)
+
+---
+
+## 项目概述
+
+在多分支代码管理场景中（如 `master` 保留完整代码和注释，`release` 分发给第三方时需隐藏核心设计注释），开发者需要在注释中添加特定标记以区分"内部注释"和"公开注释"。
+
+**markstrip** 是一个 Python 库 + CLI 工具，专门解决这一问题：
+
+- 在注释中写入 `@internal` 标记
+- 发布时运行 markstrip，自动删除所有带标记的注释
+- 普通注释原样保留，不影响文档可读性
+
+### 典型应用场景
+
+| 场景 | 说明 |
+|------|------|
+| 代码分发 | 将内部实现细节标记为 `@internal`，分发时隐藏 |
+| 技术文档 | Markdown 中嵌入含内部注释的代码块，发布时自动清理 |
+| CI/CD 集成 | 在构建流水线中自动清理标记注释后再部署 |
+| 多版本维护 | 同一代码库维护内部版和公开版，通过标记控制注释可见性 |
+
+---
 
 ## 核心特性
 
 - **选择性过滤**：仅删除含 `@internal` 标记的注释，普通注释原样保留
-- **行级精确删除**：行尾标记注释仅删除注释部分，保留同行的代码
-- **Docstring 整体删除**：`@internal-docstring` 标记可整体删除 docstring
+- **行级精确删除**：行尾标记注释仅删除注释部分（`# @internal`），保留同行的代码
+- **Docstring 整体删除**：`@internal-docstring` 标记可整体删除整个 docstring
+- **Docstring 逐行过滤**：docstring 内逐行 `@internal` 标记仅删除对应行
 - **Markdown 支持**：解析代码块并委托对应语言插件处理，支持嵌套代码块删除和 HTML 注释过滤
-- **全量模式**：`full` 模式删除所有注释（保留 shebang/TODO/编码声明等）
-- **插件架构**：支持通过 `entry_points` 自动发现第三方语言插件
-- **语法错误容错**：`tokenize` 失败时自动回退到正则匹配
+- **全量模式**：`full` 模式删除所有注释（保留 shebang / TODO / 编码声明等）
+- **插件架构**：内置 Python 和 Markdown 插件，支持自定义插件和 `entry_points` 自动发现
+- **语法错误容错**：`tokenize` 失败时自动回退到正则匹配，不中断处理
+- **零运行时依赖**：仅使用 Python 标准库
 
-## 安装
+---
+
+## 安装部署
+
+### 环境要求
+
+- Python >= 3.10
+- 无外部依赖
+
+### 从 PyPI 安装（推荐）
 
 ```bash
 pip install markstrip
 ```
 
-开发安装：
+### 开发安装（可编辑模式）
 
 ```bash
+git clone <repo-url>
 cd markstrip
 pip install -e .
 ```
 
-## 标记类型
+安装后验证：
 
-| 标记 | 作用域 | 行为 |
-|------|--------|------|
-| `@internal` | 行级 | 删除含此标记的注释行或行尾注释部分 |
-| `@internal-docstring` | docstring 级 | 整体删除包含此标记的 docstring |
-| `<!-- @internal -->` | Markdown HTML 注释 | 删除含此标记的 HTML 注释 |
+```bash
+markstrip --help
+```
 
-### Python 示例
+---
+
+## 快速开始
+
+### 命令行
+
+```bash
+# 预览清理效果（不修改文件）
+markstrip source.py --dry-run
+
+# 原地清理文件
+markstrip source.py
+
+# 输出到指定文件
+markstrip source.py -o cleaned.py
+
+# 递归清理目录
+markstrip src/ --recursive
+
+# 删除所有注释（full 模式）
+markstrip source.py --mode full
+```
+
+### Python API
+
+```python
+from markstrip import strip
+
+# 清理字符串
+result = strip(
+    "# @internal 内部注释\nx = 1\n",
+    language="python"
+)
+print(result.cleaned_content)  # 'x = 1\n'
+print(result.removed_count)    # 1
+```
+
+---
+
+## 标记类型详解
+
+| 标记 | 位置 | 作用域 | 行为 |
+|------|------|--------|------|
+| `@internal` | 行注释 `# @internal` | 单行 | 删除该注释行，或删除行尾注释部分 |
+| `@internal` | docstring 内行首 | docstring 内单行 | 仅删除该行内容（保留空行） |
+| `@internal-docstring` | docstring 首行 | 整个 docstring | 整体删除 docstring |
+| `<!-- @internal -->` | Markdown HTML 注释 | 整个注释 | 删除含标记的 HTML 注释 |
+
+### 示例 1：行注释过滤
 
 **输入：**
 
@@ -57,7 +157,7 @@ x = 1
 y = 2
 ```
 
-### Docstring 逐行过滤
+### 示例 2：Docstring 逐行过滤
 
 **输入：**
 
@@ -72,7 +172,6 @@ def online_predict():
     Online 任务双重超时控制:
     Layer 1: requests.timeout
     """
-
     timeout = 1
     return timeout
 ```
@@ -86,16 +185,14 @@ def online_predict():
 
 
 
-
     Online 任务双重超时控制:
     Layer 1: requests.timeout
     """
-
     timeout = 1
     return timeout
 ```
 
-### Docstring 整体删除
+### 示例 3：Docstring 整体删除
 
 **输入：**
 
@@ -104,11 +201,8 @@ def online_predict():
     """
     @internal-docstring
     Online 推理任务调度 - 自适应超时策略
-
     本模块调度任务到 native worker
-    native worker 使用 solo pool 模式
     """
-
     timeout = 1
     return timeout
 ```
@@ -122,245 +216,542 @@ def online_predict():
     return timeout
 ```
 
-## 使用方式
+---
 
-### CLI 命令行
+## CLI 命令行使用指南
 
-```bash
-# 预览清理结果（不修改文件）
-markstrip source.py --dry-run
+### 命令格式
 
-# 清理单个文件并输出到指定路径
-markstrip input.py -o output.py
-
-# 原地清理单个文件
-markstrip source.py
-
-# 递归清理目录下所有 .py/.md 文件
-markstrip src/ --recursive
-
-# 使用 full 模式（删除所有注释，保留 shebang/TODO）
-markstrip source.py --mode full
-
-# 自定义标记符号
-markstrip source.py --marker @private --dry-run
-
-# full 模式下保留 docstring
-markstrip source.py --mode full --preserve-docstrings
-
-# 显示详细处理信息
-markstrip src/ -r -v
+```
+markstrip <路径> [选项]
 ```
 
-### Python API
+### 参数说明
+
+| 参数 | 简写 | 类型 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `path` | — | 位置参数 | 必填 | 文件或目录路径 |
+| `--mode` | — | `selective` / `full` | `selective` | 清理模式 |
+| `--marker` | — | 字符串 | `@internal` | 行级标记符号 |
+| `--docstring-marker` | — | 字符串 | `@internal-docstring` | docstring 整体标记 |
+| `--dry-run` | — | 布尔标志 | `False` | 预览模式，不修改文件，输出到 stdout |
+| `--output` | `-o` | 路径 | — | 输出文件路径（仅单文件模式） |
+| `--recursive` | `-r` | 布尔标志 | `False` | 递归处理目录 |
+| `--preserve-docstrings` | — | 布尔标志 | `False` | full 模式下保留 docstring |
+| `--verbose` | `-v` | 布尔标志 | `False` | 显示详细处理信息 |
+
+### 使用示例
+
+```bash
+# 预览清理结果
+markstrip source.py --dry-run
+
+# 输出到指定文件
+markstrip input.py -o output.py
+
+# 原地修改文件
+markstrip source.py
+
+# 递归处理目录
+markstrip src/ --recursive
+
+# 递归处理目录（预览 + 详情）
+markstrip src/ --recursive --dry-run --verbose
+
+# 使用 full 模式
+markstrip source.py --mode full
+
+# full 模式 + 保留 docstring
+markstrip source.py --mode full --preserve-docstrings
+
+# 自定义标记
+markstrip source.py --marker @private --dry-run
+
+# 自定义 docstring 标记
+markstrip source.py --docstring-marker @private-doc --dry-run
+
+# 处理 Markdown 文件
+markstrip docs/guide.md --dry-run
+```
+
+### 退出码
+
+| 退出码 | 含义 |
+|--------|------|
+| `0` | 成功 |
+| `1` | 错误（路径不存在 / 目录缺少 --recursive） |
+
+---
+
+## Python API 使用指南
+
+### 核心函数
+
+#### `strip()`
+
+清理字符串内容中的标记注释。
+
+```python
+from markstrip import strip
+
+result = strip(
+    content: str,
+    *,
+    language: str | None = None,      # 显式指定语言
+    filename: str | None = None,      # 文件名（用于扩展名检测）
+    mode: str = "selective",          # "selective" | "full"
+    config: StripConfig | None = None, # 清理配置
+) -> StripResult
+```
+
+**StripResult 属性：**
+
+| 属性 | 类型 | 说明 |
+|------|------|------|
+| `cleaned_content` | `str` | 清理后的内容 |
+| `removed_count` | `int` | 删除/变更的行数 |
+| `detected_language` | `str` | 检测到的语言标识符 |
+| `warnings` | `list[str]` | 警告信息列表 |
+
+#### `strip_file()`
+
+清理文件中的标记注释。
+
+```python
+from markstrip import strip_file
+
+result = strip_file(
+    path: str | Path,
+    *,
+    mode: str = "selective",
+    config: StripConfig | None = None,
+    inplace: bool = False,  # True 则原地修改文件
+) -> StripResult
+```
+
+#### `strip_directory()`
+
+批量清理目录下的文件。
+
+```python
+from markstrip import strip_directory
+
+results = strip_directory(
+    path: str | Path,
+    *,
+    mode: str = "selective",
+    config: StripConfig | None = None,
+    extensions: list[str] | None = None,  # 限制扩展名，如 [".py"]
+    inplace: bool = False,
+) -> list[StripResult]
+```
+
+#### `register_plugin()`
+
+注册自定义语言插件。
+
+```python
+from markstrip import register_plugin
+
+register_plugin(my_custom_plugin)
+```
+
+### 使用示例
 
 ```python
 from markstrip import strip, strip_file, strip_directory, StripConfig
 
-# 清理字符串内容
+# --- 清理字符串 ---
 result = strip(
-    content,
-    language="python",  # 或 filename="source.py"
-    mode="selective",   # 或 "full"
+    "# @internal 删除\nx = 1\n",
+    language="python"
 )
 print(result.cleaned_content)
-print(f"移除了 {result.removed_count} 处")
+print(result.detected_language)  # "python"
+print(result.removed_count)      # 1
 
-# 清理单个文件（原地修改）
+# --- 通过文件名检测语言 ---
+result = strip(content, filename="test.py")
+
+# --- 清理 Markdown ---
+result = strip(
+    "```python\n# @internal 删除\nx = 1\n```\n",
+    filename="doc.md"
+)
+
+# --- 清理文件（原地修改） ---
 strip_file("source.py", inplace=True)
 
-# 清理单个文件（输出到新文件）
+# --- 清理文件（不修改，仅获取结果） ---
 result = strip_file("source.py")
-# result.cleaned_content 为清理后的内容
+cleaned = result.cleaned_content
 
-# 批量清理目录
+# --- 批量清理目录 ---
 results = strip_directory("src/", mode="selective", inplace=True)
 for r in results:
     print(f"移除了 {r.removed_count} 处")
+
+# --- 限制扩展名 ---
+results = strip_directory("src/", extensions=[".py", ".md"])
 ```
 
-### 自定义配置
+---
+
+## 配置参数完整说明
+
+### StripConfig 数据类
+
+```python
+from markstrip import StripConfig
+
+config = StripConfig(
+    line_marker="@internal",           # 行级标记符号
+    docstring_marker="@internal-docstring",  # docstring 整体标记
+    preserve_docstrings=True,          # full 模式下是否保留 docstring
+    preserve_todo=True,                # full 模式下是否保留 TODO/FIXME
+    custom_markers=[],                 # 额外的自定义标记列表
+)
+```
+
+### 参数详解
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `line_marker` | `str` | `"@internal"` | 行级标记符号。含此标记的注释行或行尾注释将被删除 |
+| `docstring_marker` | `str` | `"@internal-docstring"` | docstring 整体标记。放在 docstring 首行时，整体删除 |
+| `preserve_docstrings` | `bool` | `True` | full 模式下是否保留 docstring |
+| `preserve_todo` | `bool` | `True` | full 模式下是否保留 TODO/FIXME 注释 |
+| `custom_markers` | `list[str]` | `[]` | 额外标记列表，与 `line_marker` 等效 |
+
+### 自定义标记示例
 
 ```python
 from markstrip import strip, StripConfig
 
 config = StripConfig(
-    line_marker="@private",           # 自定义行级标记
-    docstring_marker="@private-doc",  # 自定义 docstring 标记
-    preserve_docstrings=True,         # full 模式保留 docstring
-    preserve_todo=True,              # full 模式保留 TODO/FIXME
-    custom_markers=["@confidential"], # 额外标记列表
+    line_marker="@private",
+    docstring_marker="@private-doc",
+    custom_markers=["@confidential", "@secret"],
 )
 
-result = strip(content, filename="source.py", config=config)
+result = strip(content, language="python", config=config)
+# 会删除所有 # @private, # @confidential, # @secret 注释
 ```
+
+---
 
 ## Markdown 支持
 
-markstrip 可以处理 Markdown 文件中的代码块，将代码块内容委托给对应语言插件处理。
-
 ### 代码块委托
 
-Markdown 中的 `` ```python `` 代码块会委托给 PythonPlugin 处理，`@internal` 标记注释会被过滤：
-
-**输入：**
+Markdown 中的围栏代码块会被解析，并委托给对应语言插件处理：
 
 ```markdown
-# 文档标题
+## 文档标题
 
 ```python
-# @internal 这行应删除
-# 普通注释保留
-x = 1  # @internal 行尾标记删除
+# @internal 内部实现细节
+# 公开注释
+x = 1  # @internal 行尾标记
+```
+
+一些说明文字
+
+```yaml
+# @internal 内部配置
+key: value
 ```
 ```
 
-**输出：**
-
-```markdown
-# 文档标题
-
-```python
-
-# 普通注释保留
-x = 1
-```
-```
+处理后，Python 代码块使用 `tokenize` 精确处理，YAML 代码块使用正则兜底。
 
 ### HTML 注释过滤
 
-Markdown 中的 HTML 注释也可以用 `@internal` 标记过滤：
-
-**输入：**
+**selective 模式**：仅删除含 `@internal` 标记的 HTML 注释：
 
 ```markdown
-# 文档
-
-<!-- @internal 这条 HTML 注释应删除 -->
-<!-- 这条 HTML 注释应保留 -->
+<!-- @internal 内部说明 -->        ← 删除
+<!-- 公开说明 -->                  ← 保留
 ```
 
-**输出：**
-
-```markdown
-# 文档
-
-<!-- 这条 HTML 注释应保留 -->
-```
+**full 模式**：删除所有 HTML 注释。
 
 ### 嵌套代码块删除
 
-在 Markdown 代码块内部，缩进的 `` ``` 围栏会被识别为嵌套代码块。当外层代码块是 Python 时，嵌套的纯文本代码块（无语言标识）会被整体删除：
-
-**输入：**
-
-````markdown
-## 核心算法
-
-```python
-def process_data(data):
-    """数据处理"""
-    clean_data = preprocess(data)
-
-    ```
-    核心算法细节：
-    1. 使用TensorRT加速
-    2. batch_size=4最优
-    ```
-
-    result = model.predict(clean_data)
-    return result
-```
-````
-
-**输出：**
+代码块内部缩进的 ``` 围栏被识别为嵌套代码块，整体删除：
 
 ```markdown
-## 核心算法
-
 ```python
-def process_data(data):
-    """数据处理"""
-    clean_data = preprocess(data)
+def process(data):
+    data = preprocess(data)
 
-    result = model.predict(clean_data)
-    return result
+    ```
+    内部算法细节
+    ```
+
+    return model.predict(data)
 ```
 ```
 
-## 支持的语言
+处理后嵌套代码块整体删除，保留外层代码逻辑。
 
-| 语言 | 扩展名 | 实现方式 |
-|------|--------|----------|
-| Python | `.py` `.pyw` `.pyi` | `tokenize` 词法分析 |
-| Markdown | `.md` `.markdown` | 正则解析代码块 + 委托语言插件 |
+### 未知语言兜底
 
-后续可扩展 Java、JavaScript、C++ 等语言。
+对于未注册语言（如 `rust`），代码块内容原样保留。以下语言有正则兜底模板：
 
-## 插件系统
+| 语言 | 注释语法 | 示例 |
+|------|----------|------|
+| `yaml`, `bash`, `shell` | `#` | `# @internal key: val` |
+| `javascript`, `java`, `c`, `cpp` | `//` | `// @internal console.log()` |
 
-markstrip 采用插件注册表架构，每个语言是独立的插件。第三方插件通过 `entry_points` 自动发现。
+---
 
-### 自定义插件示例
+## 全量模式（full）保留规则
+
+`--mode full` 删除所有注释，但以下内容会被保留：
+
+| 保留项 | 示例 | 控制参数 |
+|--------|------|----------|
+| Shebang | `#!/usr/bin/env python` | 始终保留 |
+| 编码声明 | `# -*- coding: utf-8 -*-` | 始终保留 |
+| TODO/FIXME | `# TODO: fix later` | `preserve_todo`（默认 True） |
+| 类型注释 | `# type: ignore` | 始终保留 |
+| Docstring | `"""module doc"""` | `preserve_docstrings`（默认 True） |
+
+---
+
+## 项目架构
+
+```
+用户调用 strip(content, language="python")
+    │
+    ▼
+┌─────────────────────────────────────────────┐
+│              StripEngine                      │
+│  主引擎：调度插件执行清理                      │
+│  语言解析优先级：显式指定 > 扩展名 > 内容探测   │
+└─────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────┐
+│           LanguageRegistry                    │
+│  插件注册表：按名称/扩展名查找插件              │
+└─────────────────────────────────────────────┘
+    │
+    ├──► PythonPlugin  ── tokenize 词法分析 + 行级重组
+    │
+    ├──► MarkdownPlugin ── 代码块委托 + HTML 注释
+    │         │
+    │         └──► PythonPlugin (委托)
+    │
+    └──► 第三方插件 (entry_points 自动发现)
+```
+
+### 处理流程
+
+```
+源代码
+  │
+  ├─ Phase 1: tokenize 词法分析
+  │   └─ 精确识别 COMMENT / STRING token 位置
+  │
+  ├─ Phase 2: 注释处理
+  │   ├─ selective: 仅删除含 @internal 标记的 COMMENT
+  │   └─ full: 删除所有 COMMENT（保留 shebang/TODO 等）
+  │
+  ├─ Phase 3: Docstring 处理
+  │   ├─ 检查 @internal-docstring → 整体删除
+  │   └─ 检查 @internal 逐行 → 删除标记行
+  │
+  └─ Phase 4: 行级重组
+      └─ 按行号映射，保留非注释代码
+```
+
+---
+
+## 模块说明
+
+| 模块 | 路径 | 职责 |
+|------|------|------|
+| 公共 API | `markstrip/__init__.py` | `strip()`, `strip_file()`, `strip_directory()`, `register_plugin()` |
+| CLI | `markstrip/cli.py` | argparse 命令行入口 |
+| 核心引擎 | `markstrip/core/engine.py` | `StripEngine`：插件调度、语言解析 |
+| 配置 | `markstrip/core/config.py` | `StripConfig` 数据类 |
+| 结果 | `markstrip/core/result.py` | `StripResult` 数据类 |
+| 异常 | `markstrip/core/errors.py` | `MarkstripError`, `PluginNotFoundError`, `TokenizeError` |
+| 插件基类 | `markstrip/languages/base.py` | `LanguagePlugin` 抽象基类 |
+| 注册表 | `markstrip/languages/registry.py` | `LanguageRegistry` 插件注册与查找 |
+| Python 插件 | `markstrip/languages/python_plugin.py` | `PythonPlugin`：tokenize + 行级重组 |
+| Markdown 插件 | `markstrip/languages/markdown_plugin.py` | `MarkdownPlugin`：代码块解析 + 委托 |
+| 内置注册 | `markstrip/languages/_builtin.py` | 默认插件注册 + entry_points 自动发现 |
+
+---
+
+## 扩展开发指南
+
+### 方式一：代码内注册
+
+实现 `LanguagePlugin` 抽象基类，然后调用 `register_plugin()` 注册：
 
 ```python
+from markstrip import register_plugin
 from markstrip.core.config import StripConfig
 from markstrip.languages.base import LanguagePlugin
+import re
 
 
 class JavaScriptPlugin(LanguagePlugin):
+    """JavaScript 语言插件"""
+
     @property
     def name(self) -> str:
         return "javascript"
 
     @property
     def file_extensions(self) -> list[str]:
-        return [".js", ".mjs"]
+        return [".js", ".jsx", ".mjs"]
 
     def strip_selective(self, content: str, config: StripConfig) -> str:
-        # 实现 selective 模式过滤逻辑
-        ...
+        # 收集所有标记
+        markers = [config.line_marker] + config.custom_markers
+        marker_alt = "|".join(re.escape(m) for m in markers)
+
+        # 删除 // @internal 行注释
+        line_pattern = rf"^\s*//\s*(?:{marker_alt}).*$\n?"
+        content = re.sub(line_pattern, "", content, flags=re.MULTILINE)
+
+        # 删除 /* @internal */ 块注释
+        block_pattern = rf"/\*[^*]*?(?:{marker_alt}).*?\*/"
+        content = re.sub(block_pattern, "", content, flags=re.DOTALL)
+
+        return content
 
     def strip_full(self, content: str, config: StripConfig) -> str:
-        # 实现 full 模式过滤逻辑
-        ...
+        # 删除所有 // 注释
+        content = re.sub(r"^\s*//.*$\n?", "", content, flags=re.MULTILINE)
+        # 删除所有 /* */ 块注释
+        content = re.sub(r"/\*.*?\*/", "", content, flags=re.DOTALL)
+        return content
 
 
 # 注册插件
-from markstrip import register_plugin
 register_plugin(JavaScriptPlugin())
 ```
 
-### entry_points 自动发现
+### 方式二：entry_points 自动发现（推荐用于第三方包）
 
-在 `pyproject.toml` 中注册 entry point，markstrip 启动时自动加载：
+在第三方包的 `pyproject.toml` 中注册：
 
 ```toml
 [project.entry-points."markstrip.plugins"]
-javascript = "my_plugin:JavaScriptPlugin"
+javascript = "my_package.js_plugin:JavaScriptPlugin"
+java = "my_package.java_plugin:JavaPlugin"
 ```
 
-## 运行模式
+markstrip 启动时会通过 `_builtin.py` 中的 `_discover_entry_point_plugins()` 自动加载。
 
-### selective 模式（默认）
+### 插件开发要点
 
-仅删除含标记的注释，保留所有普通注释和代码。适用于 release 分支清理场景。
+| 关注点 | 建议 |
+|--------|------|
+| `#` 注释语言 | Python / Ruby / YAML / Bash：正则 `^\s*#\s*@internal` 即可 |
+| `//` 注释语言 | JS / Java / C++：正则 `^\s*//\s*@internal` + 块注释 `/* */` |
+| 字符串安全 | 如需精确处理（避免误删字符串中的 `#`），使用该语言的词法分析器 |
+| Docstring | 仅 Python 有 docstring 概念，其他语言无需实现 |
+| `detect()` | 可选实现，用于内容探测（无文件名/语言指定时的回退） |
 
-### full 模式
+---
 
-删除所有注释，但保留以下内容：
-- shebang（`#!`）
-- 编码声明（`# -*- coding: utf-8 -*-`）
-- TODO/FIXME 注释（可通过 `preserve_todo=False` 关闭）
-- 类型注释（`# type: ignore`）
-- docstring（默认保留，可通过 `preserve_docstrings=False` 删除）
+## 常见问题（FAQ）
+
+### Q1：markstrip 会误删字符串中的 `#` 吗？
+
+**A**：不会。Python 插件使用 `tokenize` 词法分析器精确识别注释，能区分注释中的 `#` 和字符串中的 `#`。例如：
+
+```python
+url = "https://example.com/path#fragment"  # 不会被误删
+```
+
+但在语法错误代码中（tokenize 失败），会回退到正则匹配，此时无法区分字符串中的 `#`。
+
+### Q2：selective 模式和 full 模式有什么区别？
+
+- **selective**：仅删除含 `@internal` 标记的注释，保留所有其他注释
+- **full**：删除所有注释，但保留 shebang、编码声明、TODO/FIXME（可配置）、docstring（可配置）
+
+### Q3：如何自定义标记符号？
+
+```python
+config = StripConfig(line_marker="@private")
+result = strip(content, language="python", config=config)
+```
+
+或 CLI：
+
+```bash
+markstrip source.py --marker @private
+```
+
+### Q4：如何同时使用多个标记？
+
+使用 `custom_markers` 参数：
+
+```python
+config = StripConfig(custom_markers=["@secret", "@confidential"])
+result = strip(content, language="python", config=config)
+```
+
+### Q5：如何只处理特定类型的文件？
+
+使用 `strip_directory()` 的 `extensions` 参数：
+
+```python
+results = strip_directory("src/", extensions=[".py", ".pyi"])
+```
+
+### Q6：如何在 CI/CD 中集成 markstrip？
+
+```bash
+# 在构建脚本中
+pip install markstrip
+markstrip src/ --recursive --verbose
+# 或在 Python 中
+python -c "from markstrip import strip_directory; strip_directory('src/', inplace=True)"
+```
+
+### Q7：markstrip 会修改文件编码吗？
+
+不会。所有文件读/写均使用 UTF-8 编码。
+
+### Q8：为什么 `# @internal` 行删除后还留有空行？
+
+行尾标记注释（如 `x = 1  # @internal`）删除注释部分后，代码部分保留，因此该行不会变成空行。整行都是 `# @internal` 的行会被完全删除（含换行符），不留空行。
+
+### Q9：支持哪些 Python 版本？
+
+Python 3.10 及以上。
+
+### Q10：如何处理 Git 仓库中的清理？
+
+建议在构建/发布流程中自动运行 markstrip，而非直接修改仓库中的源码。也可以使用 `--dry-run` 预览效果后再决定。
+
+---
 
 ## 已知限制
 
-- **语法错误时的正则回退**：当 Python 代码存在语法错误导致 `tokenize` 失败时，回退到正则匹配。正则回退支持整行标记注释和行内标记注释的删除，但**无法区分字符串中的 `#` 和注释 `#`**，可能误删字符串中含标记的内容。此为已知限制，仅在 tokenize 失败时触发。
-- **Markdown 嵌套代码块**：仅支持删除无语言标识的嵌套代码块。有语言标识的嵌套代码块不会被删除。
+1. **语法错误时的正则回退**：当 Python 代码存在语法错误导致 `tokenize` 失败时，回退到正则匹配。正则回退**无法区分字符串中的 `#` 和注释 `#`**，可能误删字符串中含标记的内容。此为已知限制，仅在 tokenize 失败时触发。
+
+2. **Markdown 嵌套代码块**：仅支持删除无语言标识的嵌套代码块。有语言标识的嵌套代码块不会被删除。
+
+3. **Markdown HTML 注释**：仅支持 `<!-- -->` 格式的 HTML 注释，不支持条件注释等复杂格式。
+
+4. **不支持的语言**：未注册插件的语言代码块在 Markdown 中会原样保留（除非有正则兜底模板）。
+
+---
 
 ## 测试
+
+### 运行测试
 
 ```bash
 # 运行全部测试
@@ -371,40 +762,69 @@ python -m pytest tests/unit/ -v
 
 # 仅运行 CLI 集成测试
 python -m pytest tests/integration/ -v
+
+# 运行特定测试文件
+python -m pytest tests/unit/test_python_plugin.py -v
 ```
 
-测试采用 Golden File 测试策略：每个测试用例包含输入文件（`xxx.py`）和期望输出文件（`xxx.expected.py`），通过参数化测试自动验证。
+### 测试策略
 
-## 项目结构
+项目采用 **Golden File 测试策略**：每个测试用例包含输入文件（`xxx.py`）和期望输出文件（`xxx.expected.py`），通过 `conftest.py` 中的 `collect_golden_cases()` 自动收集匹配，使用 pytest 参数化测试自动验证。
 
 ```
-markstrip/
-├── markstrip/
-│   ├── __init__.py          # 公共 API: strip(), strip_file(), strip_directory()
-│   ├── cli.py               # CLI 命令行工具
-│   ├── py.typed             # PEP 561 类型标记
-│   ├── core/
-│   │   ├── config.py        # StripConfig 配置
-│   │   ├── result.py        # StripResult 结果
-│   │   ├── errors.py        # 异常定义
-│   │   └── engine.py        # StripEngine 核心引擎
-│   └── languages/
-│       ├── base.py           # LanguagePlugin 抽象基类
-│       ├── registry.py       # LanguageRegistry 插件注册表
-│       ├── python_plugin.py  # Python 语言插件
-│       ├── markdown_plugin.py # Markdown 语言插件
-│       └── _builtin.py       # 默认插件注册
-├── tests/
-│   ├── conftest.py           # Golden file 测试辅助
-│   ├── unit/                 # 单元测试
-│   ├── integration/          # 集成测试
-│   └── golden/               # Golden 测试文件
-│       ├── python/           # Python 测试用例
-│       └── markdown/         # Markdown 测试用例
-├── docs/
-│   └── markstrip-design.md   # 设计文档
-└── pyproject.toml
+tests/
+├── unit/                          # 单元测试
+│   ├── test_config.py             # StripConfig 测试
+│   ├── test_result.py             # StripResult 测试
+│   ├── test_registry.py           # LanguageRegistry 测试
+│   ├── test_python_plugin.py      # PythonPlugin 测试（含 Golden 测试）
+│   ├── test_markdown_plugin.py    # MarkdownPlugin 测试（含 Golden 测试）
+│   └── test_engine.py             # StripEngine 和公共 API 测试
+├── integration/
+│   └── test_cli.py                # CLI 集成测试
+├── golden/
+│   ├── python/                    # Python Golden 测试文件
+│   └── markdown/                  # Markdown Golden 测试文件
+└── conftest.py                    # Golden 文件收集工具
 ```
+
+---
+
+## 后续发展方向
+
+### 短期（v0.2.x）
+
+- [ ] 新增 JavaScript / TypeScript 插件（`tokenize` 替代方案）
+- [ ] 新增 Java 插件
+- [ ] 新增 C / C++ 插件
+- [ ] 支持 `--config` 配置文件（JSON/YAML）
+- [ ] 支持 `--ignore` 忽略特定文件/目录
+
+### 中期（v0.3.x）
+
+- [ ] 新增 Rust 插件
+- [ ] 新增 Go 插件
+- [ ] 支持行内块注释标记（如 `/* @internal */` 在 JS/Java 中）
+- [ ] `--check` 模式（仅检查是否有未清理的标记，不修改文件）
+- [ ] 支持 stdin/stdout 管道模式
+
+### 长期（v1.0）
+
+- [ ] tree-sitter 集成（替代纯正则兜底，提供跨语言精确 AST 解析）
+- [ ] 增量模式（仅处理变更文件）
+- [ ] VS Code 扩展
+- [ ] pre-commit hook 集成
+- [ ] 性能优化（大文件并行处理）
+
+### 贡献指南
+
+欢迎贡献新语言插件。请参考 [扩展开发指南](#扩展开发指南) 和现有的 `PythonPlugin` / `MarkdownPlugin` 实现。提交 PR 时请确保：
+
+1. 新增语言插件实现 `LanguagePlugin` 接口
+2. 包含对应的 Golden 测试文件
+3. 所有现有测试继续通过
+
+---
 
 ## License
 
