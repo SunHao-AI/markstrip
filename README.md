@@ -446,7 +446,7 @@ result = strip(content, language="python", config=config)
 
 Markdown 中的围栏代码块会被解析，并委托给对应语言插件处理：
 
-```markdown
+````markdown
 ## 文档标题
 
 ```python
@@ -461,7 +461,7 @@ x = 1  # @internal 行尾标记
 # @internal 内部配置
 key: value
 ```
-```
+````
 
 处理后，Python 代码块使用 `tokenize` 精确处理，YAML 代码块使用正则兜底。
 
@@ -480,7 +480,7 @@ key: value
 
 代码块内部缩进的 ``` 围栏被识别为嵌套代码块，整体删除：
 
-```markdown
+````markdown
 ```python
 def process(data):
     data = preprocess(data)
@@ -491,7 +491,7 @@ def process(data):
 
     return model.predict(data)
 ```
-```
+````
 
 处理后嵌套代码块整体删除，保留外层代码逻辑。
 
