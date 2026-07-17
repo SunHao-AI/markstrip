@@ -133,3 +133,17 @@ def test_blockscan_result_dataclass():
     assert r.ranges[0].start_line == 1
     assert r.ranges[0].end_line == 2
     assert r.warnings == ["w"]
+
+
+class TestBlockRangeMode:
+    """BlockRange.mode 字段回归测试。"""
+
+    def test_default_mode_is_all(self):
+        from markstrip.core.block_scanner import BlockRange
+        r = BlockRange(start_line=1, end_line=3)
+        assert r.mode == "all"
+
+    def test_explicit_mode_comments(self):
+        from markstrip.core.block_scanner import BlockRange
+        r = BlockRange(start_line=1, end_line=3, mode="comments")
+        assert r.mode == "comments"

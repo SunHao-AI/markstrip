@@ -12,6 +12,7 @@ class BlockRange:
     """块范围（1-based，含两端的定界行）。"""
     start_line: int
     end_line: int
+    mode: str = "all"  # "all"=删全部(@internal-start/end), "comments"=只删注释(markstrip pragma)
 
 
 @dataclass

@@ -33,3 +33,52 @@ def scan_file_pragma(lines: list[str], comment_prefix: str) -> bool:
     """
     regex = _build_pragma_regex(comment_prefix, "full")
     return any(regex.match(line) for line in lines)
+
+
+def scan_full_ranges(
+    lines: list[str], comment_prefix: str
+) -> BlockScanResult:
+    """扫描 # markstrip: full-start / full-end 区间。
+
+    返回 BlockScanResult,ranges 中 BlockRange.mode = 'comments'。
+    块语义与 scan_blocks 一致(首 start 到首 end 闭区间、不支持嵌套、错配警告)。
+
+    Args:
+        lines: 源代码行列表(splitlines(keepends=True))。
+        comment_prefix: 注释前缀,如 "#" 或 "//"。
+
+    Returns:
+        扫描结果,ranges 的 mode 均为 "comments"。
+    """
+    start_re = _build_pragma_regex(comment_prefix, "full-start")
+    end_re = _build_pragma_regex(comment_prefix, "full-end")
+
+    ranges: list[BlockRange] = []
+    warnings: list[str] = []
+    open_start: int | None = None
+
+    for i, line in enumerate(lines, 1):
+        if start_re.match(line):
+            if open_start is not None:
+                warnings.append(f"行 {i}: 嵌套 markstrip: full-start, 已忽略")
+                continue
+            open_start = i
+        elif end_re.match(line):
+            if open_start is None:
+                warnings.append(f"行 {i}: 孤立 markstrip: full-end, 已忽略")
+                continue
+            ranges.append(
+                BlockRange(
+                    start_line=open_start,
+                    end_line=i,
+                    mode="comments",
+                )
+            )
+            open_start = None
+
+    if open_start is not None:
+        warnings.append(
+            f"行 {open_start}: 未闭合 markstrip: full-start, 已忽略"
+        )
+
+    return BlockScanResult(ranges=ranges, warnings=warnings)
