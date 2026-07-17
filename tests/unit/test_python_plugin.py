@@ -110,3 +110,17 @@ def test_python_full_golden(input_file, expected_file):
     expected = Path(expected_file).read_text(encoding="utf-8")
     result = plugin.strip_full(content, config)
     assert result == expected
+
+
+def test_block_with_custom_line_marker_derives_block_markers(plugin):
+    """line_marker=@private 时块标记应自动派生为 @private-start/-end。"""
+    config = StripConfig(line_marker="@private")
+    content = (
+        "# @private-start\n"
+        "# inside\n"
+        "# @private-end\n"
+        "x = 1\n"
+    )
+    result = plugin.strip_selective(content, config)
+    assert result == "x = 1\n"
+    assert "@private" not in result

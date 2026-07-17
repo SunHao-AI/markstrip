@@ -94,15 +94,7 @@ def test_strip_warnings_not_aliased_across_calls():
 
 
 def test_strip_warnings_propagated_from_plugin():
-    """插件回填的 warnings 应出现在 StripResult.warnings。
-
-    用块错配场景触发（Task 5 实现，此处先标记 xfail，Task 5 完成后转 pass）。
-    """
-    import pytest
+    """插件回填的 warnings 应出现在 StripResult.warnings。"""
     content = "# @internal-start\n# inside\nx = 1\n"
     result = strip(content, language="python", mode="selective")
-    # Task 5 完成前块功能未接入，warnings 应为空
-    # Task 5 完成后应有一条 "缺少匹配" 警告
-    if not result.warnings:
-        pytest.xfail("块功能未接入，warnings 暂为空（Task 5 完成后转 pass）")
     assert any("@internal-end" in w for w in result.warnings)

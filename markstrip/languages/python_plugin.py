@@ -3,6 +3,7 @@ import ast
 import re
 import tokenize
 
+from markstrip.core.block_scanner import scan_blocks
 from markstrip.core.config import StripConfig
 from markstrip.languages.base import LanguagePlugin
 
@@ -23,7 +24,10 @@ class PythonPlugin(LanguagePlugin):
         return [".py", ".pyw", ".pyi"]
 
     def strip_selective(self, content: str, config: StripConfig) -> str:
-        """标记式选择性过滤：仅删除含 @internal 标记的注释。
+        """标记式选择性过滤：仅删除含标记的注释。
+
+        支持逐行 @internal、块定界 @internal-start/-end、docstring 整体标记。
+        纯注释标记行整行移除，内联标记注释仅删注释片段保留代码。
 
         Args:
             content: Python 源代码内容。
@@ -33,7 +37,6 @@ class PythonPlugin(LanguagePlugin):
             清理后的内容。
         """
         lines = content.splitlines(keepends=True)
-        # 收集标记注释的精确位置：(行号, 起始列, 结束列)
         comment_removals: list[tuple[int, int, int]] = []
 
         # tokenize 识别注释
@@ -44,14 +47,37 @@ class PythonPlugin(LanguagePlugin):
         except tokenize.TokenError:
             return self._fallback_regex_selective(content, config)
 
+        # 块扫描
+        scan = scan_blocks(
+            lines,
+            "#",
+            config.effective_block_start(),
+            config.effective_block_end(),
+        )
+        config.warnings.extend(scan.warnings)
+        block_ranges = scan.ranges
+
+        def _in_block(line_num: int) -> bool:
+            return any(
+                r.start_line <= line_num <= r.end_line for r in block_ranges
+            )
+
         for tok in tokens:
             if tok.type == tokenize.COMMENT:
-                if self._has_marker(tok.string, config):
+                in_block = _in_block(tok.start[0])
+                if in_block:
+                    # 块内：纯注释整行移除，内联仅删片段
                     if self._is_whole_line_comment(tok, lines):
-                        # 纯注释标记行：整行移除（含换行不留空行）
                         comment_removals.append((tok.start[0], 0, -1))
                     else:
-                        # 内联标记注释：仅删注释片段保留代码
+                        comment_removals.append(
+                            (tok.start[0], tok.start[1], tok.end[1])
+                        )
+                elif self._has_marker(tok.string, config):
+                    # 块外逐行 @internal：纯注释整行移除，内联仅删片段
+                    if self._is_whole_line_comment(tok, lines):
+                        comment_removals.append((tok.start[0], 0, -1))
+                    else:
                         comment_removals.append(
                             (tok.start[0], tok.start[1], tok.end[1])
                         )
@@ -61,7 +87,7 @@ class PythonPlugin(LanguagePlugin):
                     doc_removals = self._process_docstring(tok, config, lines)
                     comment_removals.extend(doc_removals)
 
-        # 行级重组：删除标记注释文本，保留非注释代码
+        # 行级重组
         return self._rebuild(lines, comment_removals)
 
     def strip_full(self, content: str, config: StripConfig) -> str:
@@ -361,6 +387,10 @@ class PythonPlugin(LanguagePlugin):
         注意：正则无法区分字符串中的 # 和注释 #，此为已知限制。
         仅在 tokenize 失败（语法错误）时触发。
 
+        逐行 @internal 与块内删除语义一致：纯注释行整行移除（不留空行），
+        内联注释仅删片段保留代码。marker 正则要求标记后为空白/行尾，
+        自动排除块定界行与 @internalized 等伪前缀。
+
         Args:
             content: 源代码内容。
             config: 清理配置。
@@ -368,15 +398,56 @@ class PythonPlugin(LanguagePlugin):
         Returns:
             清理后的内容。
         """
+        lines = content.splitlines(keepends=True)
+        scan = scan_blocks(
+            lines,
+            "#",
+            config.effective_block_start(),
+            config.effective_block_end(),
+        )
+        config.warnings.extend(scan.warnings)
+
         markers = [config.line_marker] + config.custom_markers
         marker_alt = "|".join(re.escape(m) for m in markers)
+        # marker 后须空白或行尾：排除定界行与伪前缀
+        full_re = re.compile(rf"^\s*#\s*(?:{marker_alt})(?:\s|$).*")
+        inline_re = re.compile(rf"\s*#\s*(?:{marker_alt})(?:\s|$).*$")
+        any_comment_re = re.compile(r"^\s*#")
+        inline_any_re = re.compile(r"\s*#.*$")
 
-        # 第一遍：删除整行标记注释（含换行符）
-        full_pattern = rf"^\s*#\s*(?:{marker_alt}).*$\n?"
-        content = re.sub(full_pattern, "", content, flags=re.MULTILINE)
+        def _newline(line: str) -> str:
+            for nl in ("\r\n", "\n", "\r"):
+                if line.endswith(nl):
+                    return nl
+            return ""
 
-        # 第二遍：删除行内标记注释（仅注释部分，保留前面的代码）
-        inline_pattern = rf"\s*#\s*(?:{marker_alt}).*$"
-        content = re.sub(inline_pattern, "", content, flags=re.MULTILINE)
+        out: list[str] = []
+        block_iter = iter(scan.ranges)
+        cur = next(block_iter, None)
 
-        return content
+        def _in_block_range(line_num: int) -> bool:
+            nonlocal cur
+            while cur is not None and line_num > cur.end_line:
+                cur = next(block_iter, None)
+            return cur is not None and cur.start_line <= line_num <= cur.end_line
+
+        for i, line in enumerate(lines, 1):
+            nl = _newline(line)
+            body = line[:-len(nl)] if nl else line
+            if _in_block_range(i):
+                # 块内：纯注释行整行丢弃；否则删内联注释片段保留代码
+                if any_comment_re.match(body):
+                    continue
+                cleaned = inline_any_re.sub("", body).rstrip()
+                if cleaned:
+                    out.append(cleaned + nl)
+            else:
+                # 块外：逐行 @internal（marker 边界已排除定界行）
+                if full_re.match(body):
+                    continue
+                cleaned = inline_re.sub("", body)
+                if cleaned.strip() == "":
+                    continue
+                out.append(cleaned.rstrip() + nl)
+
+        return "".join(out)
