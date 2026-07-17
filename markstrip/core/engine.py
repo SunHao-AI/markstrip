@@ -49,6 +49,9 @@ class StripEngine:
                 warnings=["无法识别语言，跳过处理"],
             )
 
+        # warnings 瞬态通道：调用插件前清空，插件回填，调用后复制并入结果
+        config.warnings.clear()
+
         if mode == "full":
             cleaned = plugin.strip_full(content, config)
         else:
@@ -65,6 +68,7 @@ class StripEngine:
             cleaned_content=cleaned,
             removed_count=removed_count,
             detected_language=plugin.name,
+            warnings=list(config.warnings),
         )
 
     def _resolve_plugin(

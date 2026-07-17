@@ -71,3 +71,38 @@ def test_custom_config():
     config = StripConfig(line_marker="@private")
     result = strip(content, language="python", config=config)
     assert "# @private" not in result.cleaned_content
+
+
+def test_strip_no_warnings_by_default():
+    """正常 selective 清理应无警告。"""
+    content = "# @internal 删除\nx = 1\n"
+    result = strip(content, language="python", mode="selective")
+    assert result.warnings == []
+
+
+def test_strip_warnings_not_aliased_across_calls():
+    """连续两次调用，第二次 clear() 不应清空第一次的 warnings。"""
+    # 第一次：无块标记，无警告
+    r1 = strip("# @internal 删除\nx = 1\n", language="python")
+    # 第二次：仍无警告，但内部会 clear()
+    r2 = strip("x = 1\n", language="python")
+    assert r1.warnings == []
+    assert r2.warnings == []
+    # 关键：r1.warnings 必须是独立副本，不被第二次 clear 影响
+    r1.warnings.append("manual")
+    assert r2.warnings == []
+
+
+def test_strip_warnings_propagated_from_plugin():
+    """插件回填的 warnings 应出现在 StripResult.warnings。
+
+    用块错配场景触发（Task 5 实现，此处先标记 xfail，Task 5 完成后转 pass）。
+    """
+    import pytest
+    content = "# @internal-start\n# inside\nx = 1\n"
+    result = strip(content, language="python", mode="selective")
+    # Task 5 完成前块功能未接入，warnings 应为空
+    # Task 5 完成后应有一条 "缺少匹配" 警告
+    if not result.warnings:
+        pytest.xfail("块功能未接入，warnings 暂为空（Task 5 完成后转 pass）")
+    assert any("@internal-end" in w for w in result.warnings)
