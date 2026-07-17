@@ -33,8 +33,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--docstring-marker",
-        default="@internal-docstring",
-        help="整体 docstring 标记符号",
+        default="",
+        help="整体 docstring 标记（默认自动派生为 {marker}-docstring）",
+    )
+    parser.add_argument(
+        "--block-start-marker",
+        default="",
+        help="块起始标记（默认自动派生为 {marker}-start）",
+    )
+    parser.add_argument(
+        "--block-end-marker",
+        default="",
+        help="块结束标记（默认自动派生为 {marker}-end）",
     )
     parser.add_argument(
         "--dry-run",
@@ -65,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
     config = StripConfig(
         line_marker=args.marker,
         docstring_marker=args.docstring_marker,
+        block_start_marker=args.block_start_marker,
+        block_end_marker=args.block_end_marker,
         preserve_docstrings=args.preserve_docstrings,
     )
 
@@ -98,6 +110,8 @@ def _process_single_file(
             f"Processing {path}... removed {result.removed_count} lines",
             file=sys.stderr,
         )
+        for w in result.warnings:
+            print(f"Warning: {w}", file=sys.stderr)
 
     if args.dry_run:
         print(result.cleaned_content, end="")
@@ -137,6 +151,8 @@ def _process_directory(
                 f"removed {result.removed_count} lines",
                 file=sys.stderr,
             )
+            for w in result.warnings:
+                print(f"Warning: {w}", file=sys.stderr)
 
         total_removed += result.removed_count
         total_files += 1
