@@ -9,10 +9,10 @@
 ## 目标
 
 1. 引入 `@internal-start` / `@internal-end` 块定界标记
-2. 块内语义等价于逐行 `@internal`，但纯注释行**整行移除不留空行**（比逐行 `@internal` 的"清空成空行"更干净）
+2. **统一删除语义**：selective 模式下凡被标记的纯注释行（逐行 `@internal`、块内注释、docstring 内 `@internal` 行）一律**整行移除不留空行**；代码行内联标记仅删注释保留代码
 3. 标记命名随 `line_marker` 自动联动
 4. 将 `docstring_marker` 也改为"空 → 从 `line_marker` 派生"模式，使三个派生标记风格统一
-5. 向后兼容：现有逐行 `@internal` 行为与所有现有黄金测试不变
+5. 修正既有不一致：tokenize 主路径原本"清空成空行"，而正则回退与 Markdown 兜底早已"整行删除"；本次让 tokenize 路径对齐回退路径
 
 ## 非目标（YAGNI）
 
@@ -25,27 +25,31 @@
 
 | 标记类型 | 语法 | 作用范围 | 备注 |
 |---------|------|---------|------|
-| 行级标记 | `# @internal` | 单行 | 行为不变：纯注释行清空成空行；内联注释仅删注释片段 |
+| 行级标记 | `# @internal` | 单行 | 纯注释行整行移除；内联注释仅删注释片段保留代码 |
 | 块起始 | `# @internal-start` | 圈定块起始 | 随 `line_marker` 派生 |
 | 块结束 | `# @internal-end` | 圈定块结束 | 随 `line_marker` 派生 |
 | docstring 整体 | `@internal-docstring`（docstring 内） | 整个 docstring | 随 `line_marker` 派生 |
 
 **定界行匹配规则**：`^\s*{comment_prefix}\s*{marker}(?:\s|$)` —— 标记后须紧跟空白或行尾，避免 `@internal-started`、`@internalized` 等误匹配。定界行允许有前导空白（缩进）与标记后的任意说明文字。
 
-## 删除语义
+## 删除语义（统一）
 
-块区域 = `[start_line, end_line]` 闭区间（含两定界行）。块内每个注释按如下处理：
+selective 模式下，凡被标记的纯注释行（逐行 `@internal`、块内注释、docstring 内 `@internal` 行）一律**整行移除**（含换行符，不留空行）→ `end_col = -1`；代码行上的内联标记注释仅删注释文本、保留代码。
 
 | 行类型 | 处理 |
 |---|---|
-| 纯注释行（行首到注释起点之间全为空白，含缩进注释） | **整行移除**（含换行符，不留空行）→ `end_col = -1` |
-| 代码行 + 行尾内联注释 | 仅删注释文本，保留代码（rstrip 行尾空白）→ 部分删除 |
-| 纯代码行（无注释） | 原样保留 |
-| 空行 | 原样保留 |
+| 被标记的纯注释行（行首到注释起点全为空白，含缩进注释） | **整行移除**（不留空行）→ `end_col = -1` |
+| 代码行 + 行尾内联标记注释 | 仅删注释文本，保留代码（rstrip 行尾空白）→ 部分删除 |
+| 未标记的纯注释行 | 原样保留 |
+| 纯代码行 / 空行 | 原样保留 |
 
-两定界行本身是纯注释行 → 整行移除。
+两块定界行本身是被标记的纯注释行 → 整行移除。
 
-**与逐行 `@internal` 的差异**：逐行 `@internal` 的纯注释行清空成空行（保留换行、行数不变）；块标记的纯注释行整行移除（行数减少）。这是块标记的有意设计——过滤大段注释时不留空行残迹。
+**统一性**：此语义对逐行 `@internal`、块标记、docstring 内 `@internal` 三者一致。同时修正既有不一致——tokenize 主路径原本"清空成空行"，而正则回退路径（`_fallback_regex_selective` 与 Markdown 兜底）早已整行删除（正则带 `\n?` 吃掉换行）；本次让 tokenize 路径对齐回退路径。
+
+**已知限制**：当 `@internal` 内容与 docstring 的 `"""` 定界符在同一源行（如 `""" @internal secret`），整行移除会连同 `"""` 一起删掉导致语法破损。此为既有问题（原"清空"行为同样会破坏 `"""`），常见写法（`"""` 独占一行）不受影响。
+
+**范围**：仅 selective 模式。`full` 模式不在本次改动内（其对缩进纯注释仍有"清空成空行"的同类不一致，可另行统一）。
 
 ## 配置变更（`markstrip/core/config.py`）
 
@@ -74,9 +78,10 @@ class StripConfig:
 ```
 
 **向后兼容性**：
-- 默认场景（`line_marker=@internal`）下，三标记有效值与现状一致（`@internal-docstring` 等），行为不变。
-- **有意的行为变化**：当用户改 `line_marker=@private` 时，`docstring_marker` 由"保持 `@internal-docstring`"变为自动派生为 `@private-docstring`。这是预期的联动一致性改进；现有测试均使用默认 `line_marker`，不受影响。
-- 新增字段全有默认值，旧代码无需改动。
+- 默认场景（`line_marker=@internal`）下，三标记有效值与现状一致（`@internal-docstring` 等）。
+- **有意的行为变化（docstring_marker 派生）**：当用户改 `line_marker=@private` 时，`docstring_marker` 由"保持 `@internal-docstring`"变为自动派生为 `@private-docstring`。预期的联动一致性改进；现有测试均使用默认 `line_marker`，不受影响。
+- **Breaking（删除语义统一）**：selective 模式下被标记的纯注释行由"清空成空行"改为"整行移除"，输出行数减少、不再留空行残迹。这是修正 tokenize 路径与正则回退路径的既有不一致；4 个现有黄金用例的期望输出需同步更新（见测试策略）。用户代码无需改动，仅输出格式变化。
+- 新增配置字段全有默认值，旧代码无需改动。
 
 **warnings 字段语义**：由引擎每次调用插件前 `clear()`，插件在处理过程中回填（如块错配警告），引擎**复制**（`list(config.warnings)`）后并入 `StripResult.warnings`。属引擎拥有的瞬态通道，非用户配置。须复制而非引用，避免下一次调用 `clear()` 误清空上一个结果。
 
@@ -134,12 +139,14 @@ return BlockScanResult(ranges, warnings)
 
 1. `scan = scan_blocks(lines, "#", config.effective_block_start(), config.effective_block_end())`
 2. `config.warnings.extend(scan.warnings)`
-3. 遍历 token，**对 COMMENT 先判 `in_block`，再判逐行 `@internal`**：
-   - `in_block` 且 `_is_whole_line_comment(tok, lines)` → `comment_removals.append((line, 0, -1))` 整行移除
+3. 遍历 token，**对 COMMENT 先判 `in_block`，再判逐行 `@internal`**（两者删除语义现已统一）：
+   - `in_block` 且 `_is_whole_line_comment(tok, lines)` → `(line, 0, -1)` 整行移除
    - `in_block` 但内联 → `(line, start_col, end_col)` 仅删注释片段
-   - 否则 `_has_marker(tok.string, config)` → 现有逐行行为 `(line, start_col, end_col)`（清空成空行）
-4. docstring 处理沿用现有逻辑，但改用 `config.effective_docstring_marker()` 判定整体标记。
-5. 复用 `_rebuild` 不变。
+   - 否则 `_has_marker(tok.string, config)`：
+     - 纯注释行（`_is_whole_line_comment`）→ `(line, 0, -1)` 整行移除（**新**，原为部分删除留空行）
+     - 内联 → `(line, start_col, end_col)` 仅删注释片段
+4. docstring 处理：整体标记判定改用 `config.effective_docstring_marker()`；docstring 内逐行 `@internal` 的移除由"清空成空行"改为**整行移除**（`_process_docstring` 返回 `(source_line, 0, -1)` 而非 `(source_line, 0, len(line_content))`）。
+5. 复用 `_rebuild` 不变（其已支持 `end_col == -1` 整行移除）。
 
 ```python
 def _is_whole_line_comment(
@@ -153,7 +160,7 @@ def _is_whole_line_comment(
 
 ### `_has_marker` 排除块定界标记
 
-`@internal-start` / `@internal-end` 以 `@internal` 为前缀，须从逐行分支排除，避免错配定界行被清空成空行（错配定界行应保留为普通注释 + 警告）：
+`@internal-start` / `@internal-end` 以 `@internal` 为前缀，须从逐行分支排除，避免错配定界行被当作逐行 `@internal` 删除（错配定界行应保留为普通注释 + 警告）：
 
 ```python
 def _has_marker(self, comment_text: str, config: StripConfig) -> bool:
@@ -173,12 +180,12 @@ def _has_marker(self, comment_text: str, config: StripConfig) -> bool:
 
 ### 正则回退路径 `_fallback_regex_selective`
 
-按行扫描（无 tokenize）：
+按行扫描（无 tokenize）。**该路径早已整行删除纯注释 `@internal` 行**（现有 `full_pattern = ^\s*#\s*{marker}.*$\n?` 带 `\n?` 吃掉换行），与新语义天然一致，逐行部分无需改动；仅需叠加块支持：
 
 1. `scan_blocks(lines, "#", ...)` 取 ranges + warnings
 2. 逐行：
    - 块内行：`^\s*#\s*.*$` 命中纯注释行 → 整行丢弃（含换行）；否则用 `\s*#.*$` 删内联注释片段，保留代码
-   - 块外行：沿用现有逐行 `@internal` 正则逻辑（整行/内联两遍替换）
+   - 块外行：沿用现有逐行 `@internal` 正则逻辑（整行/内联两遍替换，已正确）
 
 ## Markdown 兜底集成（`markstrip/languages/markdown_plugin.py`）
 
@@ -192,7 +199,7 @@ FALLBACK_COMMENT_PREFIX = {
 }
 ```
 
-块内整行注释丢弃、内联注释删片段，逻辑同 Python 正则回退
+块内整行注释丢弃、内联注释删片段，逻辑同 Python 正则回退。`_fallback_strip` 的逐行 `@internal` 处理早已整行删除（`unknown_lang` 黄金用例可证），仅需新增块支持。
 - HTML 注释、Markdown prose 不支持块标记
 
 ## CLI 变更（`markstrip/cli.py`）
@@ -273,9 +280,18 @@ markstrip app.py --block-start-marker @secret-begin --block-end-marker @secret-e
 - `python/block_custom_marker.py` + `.expected.py` — `line_marker=@private` 联动
 - `markdown/block_in_yaml.md` + `.expected.md` — 兜底语言块标记
 
-### 回归
+### 需更新的现有黄金用例（删除语义统一）
 
-现有 `internal_comment`、`docstring_selective`、`docstring_whole`、`string_with_hash`、`syntax_error` 等用例不变，验证逐行 `@internal` 与 docstring 行为未被破坏。
+被标记的纯注释行由"清空成空行"改为"整行移除"，以下 4 个 `.expected` 需同步更新（输入不变，仅期望输出减少空行）：
+
+- `python/internal_comment.expected.py` — 行 2 空行→删除
+- `python/docstring_selective.expected.py` — docstring 内 2 行 `@internal` 由空行→删除（4 空行→2 空行，剩余为原始空行）
+- `markdown/code_block_delegation.expected.md` — 两处 python 块内 `@internal` 纯注释空行→删除
+- `markdown/html_comment.expected.md` — python 块内 `@internal` 纯注释空行→删除
+
+### 回归（不变）
+
+`python/docstring_whole`（已整行删）、`python/string_with_hash`（纯内联）、`python/syntax_error`（正则回退早已整行删）、`python/full_mode`（full 模式不在范围）、`markdown/unknown_lang`（兜底早已整行删）、`markdown/nested_codeblock` 等用例期望输出不变。
 
 ## 数据流
 
@@ -295,8 +311,8 @@ strip(content, language="python", mode="selective")
 
 1. `config.py`：3 派生字段 + `effective_*()` + `warnings` 字段
 2. `core/block_scanner.py`：新建，纯函数扫描器 + `BlockRange` / `BlockScanResult`
-3. `python_plugin.py`：`strip_selective` 接入块扫描、`_is_whole_line_comment`、`_has_marker` 排除定界、`_process_docstring` 改用 `effective_docstring_marker`、`_fallback_regex_selective` 接入块
+3. `python_plugin.py`：`strip_selective` 接入块扫描、`_is_whole_line_comment`、`_has_marker` 排除定界、逐行 `@internal` 与 docstring 内 `@internal` 改整行移除、`_process_docstring` 改用 `effective_docstring_marker`；`_fallback_regex_selective` 仅接入块（逐行已正确）
 4. `markdown_plugin.py`：`_fallback_strip` 接入块（按语言前缀）
 5. `engine.py`：`strip()` 中 `config.warnings.clear()` 前置 + 回填并入 `StripResult`
 6. `cli.py`：`--docstring-marker` 默认改空、新增两可选参数、verbose 打印 warnings
-7. 测试：BlockScanner 单测 + 7 组黄金用例 + 现有用例回归
+7. 测试：BlockScanner 单测 + 7 组新增黄金用例 + 4 组现有 `.expected` 更新 + 其余用例回归
