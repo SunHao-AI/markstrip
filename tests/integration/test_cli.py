@@ -131,3 +131,62 @@ def test_cli_verbose_warnings(tmp_path):
     assert code == 0
     assert "Warning:" in err
     assert "@internal-end" in err
+
+
+class TestCliPragma:
+    """CLI pragma 指令集成测试。"""
+
+    def test_cli_pragma_full_overrides_selective(self, tmp_path):
+        """文件有 # markstrip: full,CLI selective → 输出 full 效果。"""
+        src = tmp_path / "src.py"
+        src.write_text(
+            "# markstrip: full\n"
+            "# 注释\n"
+            "x = 1  # 行尾注释\n"
+            "y = 2\n",
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [sys.executable, "-m", "markstrip.cli", str(src), "--dry-run"],
+            capture_output=True, text=True,
+        )
+        assert "# 注释" not in result.stdout
+        assert "x = 1" in result.stdout
+        assert "y = 2" in result.stdout
+
+    def test_cli_pragma_full_with_cli_full_consistent(self, tmp_path):
+        """文件有 pragma + CLI full → 一致(冗余无副作用)。"""
+        src = tmp_path / "src.py"
+        src.write_text(
+            "# markstrip: full\n"
+            "# 注释\n"
+            "x = 1\n",
+            encoding="utf-8",
+        )
+        r_pragma = subprocess.run(
+            [sys.executable, "-m", "markstrip.cli", str(src),
+             "--dry-run", "--mode", "selective"],
+            capture_output=True, text=True,
+        )
+        r_full = subprocess.run(
+            [sys.executable, "-m", "markstrip.cli", str(src),
+             "--dry-run", "--mode", "full"],
+            capture_output=True, text=True,
+        )
+        assert r_pragma.stdout == r_full.stdout
+
+    def test_cli_verbose_pragma_warnings(self, tmp_path):
+        """--verbose 输出 pragma 错配警告。"""
+        src = tmp_path / "src.py"
+        src.write_text(
+            "# markstrip: full-end\n"
+            "x = 1\n",
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [sys.executable, "-m", "markstrip.cli", str(src),
+             "--dry-run", "--verbose"],
+            capture_output=True, text=True,
+        )
+        assert "Warning:" in result.stderr
+        assert "孤立" in result.stderr
