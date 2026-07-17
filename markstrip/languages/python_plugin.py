@@ -42,6 +42,7 @@ class PythonPlugin(LanguagePlugin):
         if scan_file_pragma(lines, "#"):
             # 检查区间标记冗余
             pragma_scan = scan_full_ranges(lines, "#")
+            config.warnings.extend(pragma_scan.warnings)
             if pragma_scan.ranges:
                 config.warnings.append("文件级 full 已生效, 区间标记冗余")
             return self.strip_full(content, config)
@@ -433,6 +434,9 @@ class PythonPlugin(LanguagePlugin):
             清理后的内容。
         """
         lines = content.splitlines(keepends=True)
+        # 文件级 pragma → 委托 strip_full
+        if scan_file_pragma(lines, "#"):
+            return self.strip_full(content, config)
         scan = scan_blocks(
             lines,
             "#",
