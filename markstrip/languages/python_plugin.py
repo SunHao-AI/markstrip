@@ -70,11 +70,32 @@ class PythonPlugin(LanguagePlugin):
                 r.start_line <= line_num <= r.end_line for r in block_ranges
             )
 
+        # pragma 区间扫描
+        pragma_scan = scan_full_ranges(lines, "#")
+        config.warnings.extend(pragma_scan.warnings)
+        pragma_ranges = pragma_scan.ranges
+
+        def _in_pragma_range(line_num: int) -> bool:
+            return any(
+                r.start_line <= line_num <= r.end_line for r in pragma_ranges
+            )
+
         for tok in tokens:
             if tok.type == tokenize.COMMENT:
                 in_block = _in_block(tok.start[0])
+                in_pragma = _in_pragma_range(tok.start[0])
                 if in_block:
                     # 块内：纯注释整行移除，内联仅删片段
+                    if self._is_whole_line_comment(tok, lines):
+                        comment_removals.append((tok.start[0], 0, -1))
+                    else:
+                        comment_removals.append(
+                            (tok.start[0], tok.start[1], tok.end[1])
+                        )
+                elif in_pragma:
+                    # pragma 区间：full 逻辑,删注释保留代码
+                    if self._is_preserved_comment(tok, config):
+                        continue
                     if self._is_whole_line_comment(tok, lines):
                         comment_removals.append((tok.start[0], 0, -1))
                     else:
@@ -92,8 +113,13 @@ class PythonPlugin(LanguagePlugin):
 
             if tok.type == tokenize.STRING:
                 if self._is_docstring(tok, tokens):
-                    doc_removals = self._process_docstring(tok, config, lines)
-                    comment_removals.extend(doc_removals)
+                    in_pragma = _in_pragma_range(tok.start[0])
+                    if in_pragma and not config.preserve_docstrings:
+                        for line_num in range(tok.start[0], tok.end[0] + 1):
+                            comment_removals.append((line_num, 0, -1))
+                    else:
+                        doc_removals = self._process_docstring(tok, config, lines)
+                        comment_removals.extend(doc_removals)
 
         # 行级重组
         return self._rebuild(lines, comment_removals)
@@ -415,6 +441,11 @@ class PythonPlugin(LanguagePlugin):
         )
         config.warnings.extend(scan.warnings)
 
+        # pragma 区间扫描
+        pragma_scan = scan_full_ranges(lines, "#")
+        config.warnings.extend(pragma_scan.warnings)
+        pragma_ranges = pragma_scan.ranges
+
         markers = [config.line_marker] + config.custom_markers
         marker_alt = "|".join(re.escape(m) for m in markers)
         # marker 后须空白或行尾：排除定界行与伪前缀
@@ -439,11 +470,23 @@ class PythonPlugin(LanguagePlugin):
                 cur = next(block_iter, None)
             return cur is not None and cur.start_line <= line_num <= cur.end_line
 
+        def _in_pragma_range(line_num: int) -> bool:
+            return any(
+                r.start_line <= line_num <= r.end_line for r in pragma_ranges
+            )
+
         for i, line in enumerate(lines, 1):
             nl = _newline(line)
             body = line[:-len(nl)] if nl else line
             if _in_block_range(i):
                 # 块内：纯注释行整行丢弃；否则删内联注释片段保留代码
+                if any_comment_re.match(body):
+                    continue
+                cleaned = inline_any_re.sub("", body).rstrip()
+                if cleaned:
+                    out.append(cleaned + nl)
+            elif _in_pragma_range(i):
+                # pragma 区间：full 逻辑,删注释保留代码
                 if any_comment_re.match(body):
                     continue
                 cleaned = inline_any_re.sub("", body).rstrip()
