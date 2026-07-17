@@ -22,7 +22,7 @@ class BlockScanResult:
 
 
 def _build_delimiter_regex(comment_prefix: str, marker: str) -> re.Pattern:
-    """构造定界行正则：^\s*{prefix}\s*{marker}(?:\s|$)。
+    r"""构造定界行正则：^\s*{prefix}\s*{marker}(?:\s|$)。
 
     要求标记后紧跟空白或行尾，避免 @internal-started 等伪前缀误匹配。
     """
