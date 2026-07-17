@@ -1,6 +1,7 @@
 """Markdown 语言插件。"""
 import re
 
+from markstrip.core.block_scanner import scan_blocks
 from markstrip.core.config import StripConfig
 from markstrip.languages.base import LanguagePlugin
 from markstrip.languages.registry import LanguageRegistry
@@ -21,6 +22,17 @@ NESTED_BLOCK_RE = re.compile(
 
 # HTML 注释正则：匹配 <!-- ... -->，\n? 移除注释后清理行尾换行
 HTML_COMMENT_RE = re.compile(r"<!--.*?-->\n?", re.DOTALL)
+
+# 兜底语言的注释前缀映射（与 _fallback_strip 的 templates 语言集合对齐）
+FALLBACK_COMMENT_PREFIX = {
+    "yaml": "#",
+    "bash": "#",
+    "shell": "#",
+    "javascript": "//",
+    "java": "//",
+    "c": "//",
+    "cpp": "//",
+}
 
 
 class MarkdownPlugin(LanguagePlugin):
@@ -149,6 +161,9 @@ class MarkdownPlugin(LanguagePlugin):
     ) -> str:
         """无对应插件时的正则兜底。
 
+        支持逐行 @internal 与块定界。纯注释标记行整行移除，内联注释
+        仅删片段保留代码。
+
         Args:
             code: 代码内容。
             lang: 语言标识符。
@@ -157,18 +172,61 @@ class MarkdownPlugin(LanguagePlugin):
         Returns:
             清理后的内容。
         """
-        templates = {
-            "yaml": r"^\s*#\s*{marker}.*$\n?",
-            "bash": r"^\s*#\s*{marker}.*$\n?",
-            "shell": r"^\s*#\s*{marker}.*$\n?",
-            "javascript": r"^\s*//\s*{marker}.*$\n?",
-            "java": r"^\s*//\s*{marker}.*$\n?",
-            "c": r"^\s*//\s*{marker}.*$\n?",
-            "cpp": r"^\s*//\s*{marker}.*$\n?",
-        }
-        template = templates.get(lang)
-        if template is None:
+        prefix = FALLBACK_COMMENT_PREFIX.get(lang)
+        if prefix is None:
             return code
-        marker = re.escape(config.line_marker)
-        pattern = template.format(marker=marker)
-        return re.sub(pattern, "", code, flags=re.MULTILINE)
+
+        lines = code.splitlines(keepends=True)
+        scan = scan_blocks(
+            lines,
+            prefix,
+            config.effective_block_start(),
+            config.effective_block_end(),
+        )
+        config.warnings.extend(scan.warnings)
+
+        markers = [config.line_marker] + config.custom_markers
+        marker_alt = "|".join(re.escape(m) for m in markers)
+        full_re = re.compile(
+            rf"^\s*{re.escape(prefix)}\s*(?:{marker_alt})(?:\s|$).*"
+        )
+        inline_re = re.compile(
+            rf"\s*{re.escape(prefix)}\s*(?:{marker_alt})(?:\s|$).*$"
+        )
+        any_comment_re = re.compile(rf"^\s*{re.escape(prefix)}")
+        inline_any_re = re.compile(rf"\s*{re.escape(prefix)}.*$")
+
+        def _newline(line: str) -> str:
+            for nl in ("\r\n", "\n", "\r"):
+                if line.endswith(nl):
+                    return nl
+            return ""
+
+        out: list[str] = []
+        block_iter = iter(scan.ranges)
+        cur = next(block_iter, None)
+
+        def _in_block_range(line_num: int) -> bool:
+            nonlocal cur
+            while cur is not None and line_num > cur.end_line:
+                cur = next(block_iter, None)
+            return cur is not None and cur.start_line <= line_num <= cur.end_line
+
+        for i, line in enumerate(lines, 1):
+            nl = _newline(line)
+            body = line[:-len(nl)] if nl else line
+            if _in_block_range(i):
+                if any_comment_re.match(body):
+                    continue
+                cleaned = inline_any_re.sub("", body).rstrip()
+                if cleaned:
+                    out.append(cleaned + nl)
+            else:
+                if full_re.match(body):
+                    continue
+                cleaned = inline_re.sub("", body)
+                if cleaned.strip() == "":
+                    continue
+                out.append(cleaned.rstrip() + nl)
+
+        return "".join(out)
