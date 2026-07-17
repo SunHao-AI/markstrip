@@ -81,3 +81,53 @@ def test_cli_full_mode(tmp_path):
     assert code == 0
     assert "#" not in out
     assert "x = 1" in out
+
+
+def test_cli_block_markers(tmp_path):
+    """默认块标记 @internal-start/-end 应被识别。"""
+    test_file = tmp_path / "test.py"
+    test_file.write_text(
+        "# @internal-start\n"
+        "# inside\n"
+        "# @internal-end\n"
+        "x = 1\n",
+        encoding="utf-8",
+    )
+    code, out, err = run_cli(str(test_file), "--dry-run")
+    assert code == 0
+    assert "@internal" not in out
+    assert "x = 1" in out
+
+
+def test_cli_custom_block_markers(tmp_path):
+    """显式覆盖块标记。"""
+    test_file = tmp_path / "test.py"
+    test_file.write_text(
+        "# @secret-begin\n"
+        "# inside\n"
+        "# @secret-end\n"
+        "x = 1\n",
+        encoding="utf-8",
+    )
+    code, out, err = run_cli(
+        str(test_file), "--dry-run",
+        "--block-start-marker", "@secret-begin",
+        "--block-end-marker", "@secret-end",
+    )
+    assert code == 0
+    assert "@secret" not in out
+    assert "x = 1" in out
+
+
+def test_cli_verbose_warnings(tmp_path):
+    """错配块定界应通过 --verbose 打印 warning。"""
+    test_file = tmp_path / "test.py"
+    test_file.write_text(
+        "# @internal-start\n"
+        "x = 1\n",
+        encoding="utf-8",
+    )
+    code, out, err = run_cli(str(test_file), "--dry-run", "--verbose")
+    assert code == 0
+    assert "Warning:" in err
+    assert "@internal-end" in err

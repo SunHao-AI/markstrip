@@ -1,7 +1,6 @@
 # 文档标题
 
 ```python
-
 # 普通注释保留
 x = 1
 ```
@@ -11,6 +10,5 @@ x = 1
 ```python
 def func():
     """docstring"""
-
     return 1
 ```
