@@ -47,9 +47,14 @@ class PythonPlugin(LanguagePlugin):
         for tok in tokens:
             if tok.type == tokenize.COMMENT:
                 if self._has_marker(tok.string, config):
-                    comment_removals.append(
-                        (tok.start[0], tok.start[1], tok.end[1])
-                    )
+                    if self._is_whole_line_comment(tok, lines):
+                        # 纯注释标记行：整行移除（含换行不留空行）
+                        comment_removals.append((tok.start[0], 0, -1))
+                    else:
+                        # 内联标记注释：仅删注释片段保留代码
+                        comment_removals.append(
+                            (tok.start[0], tok.start[1], tok.end[1])
+                        )
 
             if tok.type == tokenize.STRING:
                 if self._is_docstring(tok, tokens):
@@ -133,19 +138,43 @@ class PythonPlugin(LanguagePlugin):
             return True
         return False
 
+    def _is_whole_line_comment(
+        self, tok: tokenize.TokenInfo, lines: list[str]
+    ) -> bool:
+        """判断注释是否独占整行（行首到注释起点全为空白）。
+
+        覆盖顶格注释与缩进注释。
+
+        Args:
+            tok: COMMENT token。
+            lines: 原始行列表。
+
+        Returns:
+            True 表示该行从行首到注释起点之间全为空白。
+        """
+        line_text = lines[tok.start[0] - 1]
+        before = line_text[: tok.start[1]]
+        return before.strip() == ""
+
     def _has_marker(self, comment_text: str, config: StripConfig) -> bool:
-        """检查注释是否包含标记。
+        """检查注释是否包含行级标记（排除块定界标记）。
 
         Args:
             comment_text: 注释文本（含 # 前缀）。
             config: 清理配置。
 
         Returns:
-            是否包含标记。
+            是否包含行级标记。
         """
         markers = [config.line_marker] + config.custom_markers
-        # 去掉 # 前缀后检查
         stripped = comment_text.lstrip("#").strip()
+        # 排除块定界标记，避免 @internal-start/-end 被当作逐行 @internal
+        block_delims = {
+            config.effective_block_start(),
+            config.effective_block_end(),
+        }
+        if any(stripped.startswith(d) for d in block_delims):
+            return False
         for marker in markers:
             if stripped.startswith(marker):
                 return True
@@ -218,34 +247,35 @@ class PythonPlugin(LanguagePlugin):
 
         doc_lines = content.split("\n")
 
-        # 检查 @internal-docstring 标记（整体删除）
-        # 扫描所有行以支持标记不在首行的情况
+        # 检查整体 docstring 标记（整段删除）
+        docstring_marker = config.effective_docstring_marker()
         has_whole_marker = any(
-            line.strip().startswith(config.docstring_marker)
+            line.strip().startswith(docstring_marker)
             for line in doc_lines
         )
         if has_whole_marker:
-            # 删除整个 docstring 的所有行
             removals = []
             for line_num in range(tok.start[0], tok.end[0] + 1):
-                removals.append((line_num, 0, -1))  # -1 = 删除整行
+                removals.append((line_num, 0, -1))
             return removals
 
-        # 逐行检查 @internal 标记
+        # 逐行检查行级标记（整行移除，不留空行）
         markers = [config.line_marker] + config.custom_markers
+        block_delims = {
+            config.effective_block_start(),
+            config.effective_block_end(),
+        }
         removals: list[tuple[int, int, int]] = []
         for i, line in enumerate(doc_lines):
             stripped = line.strip()
+            # 排除块定界标记
+            if any(stripped.startswith(d) for d in block_delims):
+                continue
             for marker in markers:
                 if stripped.startswith(marker):
-                    # 映射到源文件行号，清空该行内容（保留空行）
                     source_line = tok.start[0] + i
-                    # 获取该行的长度（不含换行符）
-                    if source_line - 1 < len(lines):
-                        line_content = lines[source_line - 1].rstrip("\r\n")
-                        removals.append(
-                            (source_line, 0, len(line_content))
-                        )
+                    # 整行移除（含换行符）
+                    removals.append((source_line, 0, -1))
                     break
 
         return removals
