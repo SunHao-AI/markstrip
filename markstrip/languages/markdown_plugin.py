@@ -3,6 +3,7 @@ import re
 
 from markstrip.core.block_scanner import scan_blocks
 from markstrip.core.config import StripConfig
+from markstrip.core.pragma_scanner import scan_file_pragma, scan_full_ranges
 from markstrip.languages.base import LanguagePlugin
 from markstrip.languages.registry import LanguageRegistry
 
@@ -177,6 +178,21 @@ class MarkdownPlugin(LanguagePlugin):
             return code
 
         lines = code.splitlines(keepends=True)
+
+        # 文件级 pragma → 全量删注释
+        if scan_file_pragma(lines, prefix):
+            return self._fallback_full(lines, prefix, config)
+
+        # pragma 区间扫描
+        pragma_scan = scan_full_ranges(lines, prefix)
+        config.warnings.extend(pragma_scan.warnings)
+        pragma_ranges = pragma_scan.ranges
+
+        def _in_pragma_range(line_num: int) -> bool:
+            return any(
+                r.start_line <= line_num <= r.end_line for r in pragma_ranges
+            )
+
         scan = scan_blocks(
             lines,
             prefix,
@@ -221,6 +237,13 @@ class MarkdownPlugin(LanguagePlugin):
                 cleaned = inline_any_re.sub("", body).rstrip()
                 if cleaned:
                     out.append(cleaned + nl)
+            elif _in_pragma_range(i):
+                # pragma 区间：full 逻辑,删注释保留代码
+                if any_comment_re.match(body):
+                    continue
+                cleaned = inline_any_re.sub("", body).rstrip()
+                if cleaned:
+                    out.append(cleaned + nl)
             else:
                 if full_re.match(body):
                     continue
@@ -229,4 +252,43 @@ class MarkdownPlugin(LanguagePlugin):
                     continue
                 out.append(cleaned.rstrip() + nl)
 
+        return "".join(out)
+
+    def _fallback_full(
+        self,
+        lines: list[str],
+        prefix: str,
+        config: StripConfig,
+    ) -> str:
+        """正则兜底的全量注释删除(文件级 pragma 触发)。
+
+        删除所有注释行与行尾注释,保留代码。不保留 TODO/shebang
+        (兜底语言无统一 shebang 约定,简化处理)。
+
+        Args:
+            lines: 代码行列表(splitlines(keepends=True))。
+            prefix: 注释前缀。
+            config: 清理配置(此方法不使用 preserve_* 字段)。
+
+        Returns:
+            清理后的代码。
+        """
+        any_comment_re = re.compile(rf"^\s*{re.escape(prefix)}")
+        inline_any_re = re.compile(rf"\s*{re.escape(prefix)}.*$")
+
+        def _newline(line: str) -> str:
+            for nl in ("\r\n", "\n", "\r"):
+                if line.endswith(nl):
+                    return nl
+            return ""
+
+        out: list[str] = []
+        for line in lines:
+            nl = _newline(line)
+            body = line[:-len(nl)] if nl else line
+            if any_comment_re.match(body):
+                continue
+            cleaned = inline_any_re.sub("", body).rstrip()
+            if cleaned:
+                out.append(cleaned + nl)
         return "".join(out)
