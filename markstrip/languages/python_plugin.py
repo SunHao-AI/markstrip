@@ -5,6 +5,7 @@ import tokenize
 
 from markstrip.core.block_scanner import scan_blocks
 from markstrip.core.config import StripConfig
+from markstrip.core.pragma_scanner import scan_file_pragma, scan_full_ranges
 from markstrip.languages.base import LanguagePlugin
 
 
@@ -37,6 +38,13 @@ class PythonPlugin(LanguagePlugin):
             清理后的内容。
         """
         lines = content.splitlines(keepends=True)
+        # 文件级 pragma 检测
+        if scan_file_pragma(lines, "#"):
+            # 检查区间标记冗余
+            pragma_scan = scan_full_ranges(lines, "#")
+            if pragma_scan.ranges:
+                config.warnings.append("文件级 full 已生效, 区间标记冗余")
+            return self.strip_full(content, config)
         comment_removals: list[tuple[int, int, int]] = []
 
         # tokenize 识别注释
