@@ -50,6 +50,7 @@
 
 - **选择性过滤**：仅删除含 `@internal` 标记的注释，普通注释原样保留
 - **行级精确删除**：行尾标记注释仅删除注释部分（`# @internal`），保留同行的代码
+- **块级定界过滤**：`@internal-start` / `@internal-end` 标记可一次性过滤连续的注释区域，含定界行整体删除
 - **Docstring 整体删除**：`@internal-docstring` 标记可整体删除整个 docstring
 - **Docstring 逐行过滤**：docstring 内逐行 `@internal` 标记仅删除对应行
 - **Markdown 支持**：解析代码块并委托对应语言插件处理，支持嵌套代码块删除和 HTML 注释过滤
@@ -131,8 +132,9 @@ print(result.removed_count)    # 1
 | 标记 | 位置 | 作用域 | 行为 |
 |------|------|--------|------|
 | `@internal` | 行注释 `# @internal` | 单行 | 删除该注释行，或删除行尾注释部分 |
-| `@internal` | docstring 内行首 | docstring 内单行 | 仅删除该行内容（保留空行） |
+| `@internal` | docstring 内行首 | docstring 内单行 | 整行删除该标记行 |
 | `@internal-docstring` | docstring 首行 | 整个 docstring | 整体删除 docstring |
+| `@internal-start` / `@internal-end` | 行注释定界对 | 块区域 | 删除两个定界行及其间的所有行（含纯注释与代码行） |
 | `<!-- @internal -->` | Markdown HTML 注释 | 整个注释 | 删除含标记的 HTML 注释 |
 
 ### 示例 1：行注释过滤
@@ -184,7 +186,6 @@ def online_predict():
     Online 推理任务调度
 
 
-
     Online 任务双重超时控制:
     Layer 1: requests.timeout
     """
@@ -216,6 +217,34 @@ def online_predict():
     return timeout
 ```
 
+### 示例 4：块级定界过滤
+
+**输入：**
+
+```python
+# @internal-start
+# 这是一段被注释掉的内部实现细节
+# logger = logging.getLogger("celery")
+# logger.setLevel(logging.INFO)
+# @internal-end
+x = 1  # @internal 行尾标记
+y = 2  # 普通行尾注释
+# @internal-start
+z = 3  # 块内代码行也会被删除
+# @internal-end
+w = 4
+```
+
+**输出（selective 模式）：**
+
+```python
+x = 1
+y = 2  # 普通行尾注释
+w = 4
+```
+
+块内所有行（含定界行、纯注释行与代码行）整体删除；块外的 `@internal` 行尾标记仍按行级规则处理。
+
 ---
 
 ## CLI 命令行使用指南
@@ -233,12 +262,14 @@ markstrip <路径> [选项]
 | `path` | — | 位置参数 | 必填 | 文件或目录路径 |
 | `--mode` | — | `selective` / `full` | `selective` | 清理模式 |
 | `--marker` | — | 字符串 | `@internal` | 行级标记符号 |
-| `--docstring-marker` | — | 字符串 | `@internal-docstring` | docstring 整体标记 |
+| `--docstring-marker` | — | 字符串 | 空（自动派生为 `{marker}-docstring`） | docstring 整体标记 |
+| `--block-start-marker` | — | 字符串 | 空（自动派生为 `{marker}-start`） | 块起始定界标记 |
+| `--block-end-marker` | — | 字符串 | 空（自动派生为 `{marker}-end`） | 块结束定界标记 |
 | `--dry-run` | — | 布尔标志 | `False` | 预览模式，不修改文件，输出到 stdout |
 | `--output` | `-o` | 路径 | — | 输出文件路径（仅单文件模式） |
 | `--recursive` | `-r` | 布尔标志 | `False` | 递归处理目录 |
 | `--preserve-docstrings` | — | 布尔标志 | `False` | full 模式下保留 docstring |
-| `--verbose` | `-v` | 布尔标志 | `False` | 显示详细处理信息 |
+| `--verbose` | `-v` | 布尔标志 | `False` | 显示详细处理信息与警告 |
 
 ### 使用示例
 
@@ -269,6 +300,9 @@ markstrip source.py --marker @private --dry-run
 
 # 自定义 docstring 标记
 markstrip source.py --docstring-marker @private-doc --dry-run
+
+# 自定义块定界标记（成对使用）
+markstrip source.py --marker @private --block-start-marker @private-start --block-end-marker @private-end
 
 # 处理 Markdown 文件
 markstrip docs/guide.md --dry-run
@@ -406,22 +440,30 @@ from markstrip import StripConfig
 
 config = StripConfig(
     line_marker="@internal",           # 行级标记符号
-    docstring_marker="@internal-docstring",  # docstring 整体标记
+    docstring_marker="",               # 空→自动派生为 f"{line_marker}-docstring"
+    block_start_marker="",             # 空→自动派生为 f"{line_marker}-start"
+    block_end_marker="",               # 空→自动派生为 f"{line_marker}-end"
     preserve_docstrings=True,          # full 模式下是否保留 docstring
     preserve_todo=True,                # full 模式下是否保留 TODO/FIXME
     custom_markers=[],                 # 额外的自定义标记列表
+    # warnings: 引擎瞬态通道，非用户配置，由插件回填后并入 StripResult.warnings
 )
 ```
+
+空字符串的标记字段会在运行时通过 `effective_docstring_marker()` / `effective_block_start()` / `effective_block_end()` 自动派生，无需显式指定即可与 `line_marker` 联动。
 
 ### 参数详解
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `line_marker` | `str` | `"@internal"` | 行级标记符号。含此标记的注释行或行尾注释将被删除 |
-| `docstring_marker` | `str` | `"@internal-docstring"` | docstring 整体标记。放在 docstring 首行时，整体删除 |
+| `docstring_marker` | `str` | `""` | docstring 整体标记。空时自动派生为 `{line_marker}-docstring` |
+| `block_start_marker` | `str` | `""` | 块起始定界标记。空时自动派生为 `{line_marker}-start` |
+| `block_end_marker` | `str` | `""` | 块结束定界标记。空时自动派生为 `{line_marker}-end` |
 | `preserve_docstrings` | `bool` | `True` | full 模式下是否保留 docstring |
 | `preserve_todo` | `bool` | `True` | full 模式下是否保留 TODO/FIXME 注释 |
 | `custom_markers` | `list[str]` | `[]` | 额外标记列表，与 `line_marker` 等效 |
+| `warnings` | `list[str]` | `[]` | 引擎瞬态回填通道，非用户配置；插件写入后由引擎复制到 `StripResult.warnings` |
 
 ### 自定义标记示例
 
@@ -430,12 +472,15 @@ from markstrip import strip, StripConfig
 
 config = StripConfig(
     line_marker="@private",
-    docstring_marker="@private-doc",
+    docstring_marker="@private-doc",          # 显式指定，或留空自动派生
+    block_start_marker="@private-start",      # 显式指定，或留空自动派生
+    block_end_marker="@private-end",
     custom_markers=["@confidential", "@secret"],
 )
 
 result = strip(content, language="python", config=config)
 # 会删除所有 # @private, # @confidential, # @secret 注释
+# 以及 @private-start / @private-end 包裹的块区域
 ```
 
 ---
@@ -538,9 +583,9 @@ def process(data):
 │  插件注册表：按名称/扩展名查找插件              │
 └─────────────────────────────────────────────┘
     │
-    ├──► PythonPlugin  ── tokenize 词法分析 + 行级重组
+    ├──► PythonPlugin  ── tokenize 词法分析 + 块定界扫描 + 行级重组
     │
-    ├──► MarkdownPlugin ── 代码块委托 + HTML 注释
+    ├──► MarkdownPlugin ── 代码块委托 + HTML 注释 + 块定界兜底
     │         │
     │         └──► PythonPlugin (委托)
     │
@@ -552,19 +597,23 @@ def process(data):
 ```
 源代码
   │
-  ├─ Phase 1: tokenize 词法分析
+  ├─ Phase 1: 块定界扫描
+  │   └─ scan_blocks() 识别 @internal-start / @internal-end 包裹的块范围
+  │      （block_scanner.py 为块语义唯一真理源，Python 与 Markdown 兜底共用）
+  │
+  ├─ Phase 2: tokenize 词法分析
   │   └─ 精确识别 COMMENT / STRING token 位置
   │
-  ├─ Phase 2: 注释处理
-  │   ├─ selective: 仅删除含 @internal 标记的 COMMENT
+  ├─ Phase 3: 注释处理
+  │   ├─ selective: 仅删除含 @internal 标记的 COMMENT（块内行整体跳过）
   │   └─ full: 删除所有 COMMENT（保留 shebang/TODO 等）
   │
-  ├─ Phase 3: Docstring 处理
+  ├─ Phase 4: Docstring 处理
   │   ├─ 检查 @internal-docstring → 整体删除
-  │   └─ 检查 @internal 逐行 → 删除标记行
+  │   └─ 检查 @internal 逐行 → 整行删除标记行
   │
-  └─ Phase 4: 行级重组
-      └─ 按行号映射，保留非注释代码
+  └─ Phase 5: 行级重组
+      └─ 按行号映射，保留非注释代码，块范围行整体剔除
 ```
 
 ---
@@ -575,14 +624,15 @@ def process(data):
 |------|------|------|
 | 公共 API | `markstrip/__init__.py` | `strip()`, `strip_file()`, `strip_directory()`, `register_plugin()` |
 | CLI | `markstrip/cli.py` | argparse 命令行入口 |
-| 核心引擎 | `markstrip/core/engine.py` | `StripEngine`：插件调度、语言解析 |
-| 配置 | `markstrip/core/config.py` | `StripConfig` 数据类 |
+| 核心引擎 | `markstrip/core/engine.py` | `StripEngine`：插件调度、语言解析、warnings 传播 |
+| 配置 | `markstrip/core/config.py` | `StripConfig` 数据类（含 `effective_*` 标记派生方法） |
+| 块扫描器 | `markstrip/core/block_scanner.py` | `scan_blocks()`：块定界扫描纯函数，块语义唯一真理源 |
 | 结果 | `markstrip/core/result.py` | `StripResult` 数据类 |
 | 异常 | `markstrip/core/errors.py` | `MarkstripError`, `PluginNotFoundError`, `TokenizeError` |
 | 插件基类 | `markstrip/languages/base.py` | `LanguagePlugin` 抽象基类 |
 | 注册表 | `markstrip/languages/registry.py` | `LanguageRegistry` 插件注册与查找 |
-| Python 插件 | `markstrip/languages/python_plugin.py` | `PythonPlugin`：tokenize + 行级重组 |
-| Markdown 插件 | `markstrip/languages/markdown_plugin.py` | `MarkdownPlugin`：代码块解析 + 委托 |
+| Python 插件 | `markstrip/languages/python_plugin.py` | `PythonPlugin`：tokenize + 块定界扫描 + 行级重组 |
+| Markdown 插件 | `markstrip/languages/markdown_plugin.py` | `MarkdownPlugin`：代码块解析 + 委托 + 块定界兜底 |
 | 内置注册 | `markstrip/languages/_builtin.py` | 默认插件注册 + entry_points 自动发现 |
 
 ---
@@ -735,6 +785,14 @@ Python 3.10 及以上。
 
 建议在构建/发布流程中自动运行 markstrip，而非直接修改仓库中的源码。也可以使用 `--dry-run` 预览效果后再决定。
 
+### Q11：块级定界标记（`@internal-start` / `@internal-end`）支持嵌套吗？
+
+不支持。块定界扫描采用"首个 start 到首个 end 闭区间"语义，内层 `@internal-start` 视为错配并忽略（输出警告）。如需多段过滤，请使用多对独立的 start/end。
+
+### Q12：`--verbose` 会输出哪些警告？
+
+块定界扫描中检测到的错配（嵌套 start、未匹配的 end、未闭合的 start）、无法识别语言等情况，都会以 `Warning: ...` 形式输出到 stderr。`--verbose` 同时显示这些警告与逐文件的处理统计。
+
 ---
 
 ## 已知限制
@@ -746,6 +804,8 @@ Python 3.10 及以上。
 3. **Markdown HTML 注释**：仅支持 `<!-- -->` 格式的 HTML 注释，不支持条件注释等复杂格式。
 
 4. **不支持的语言**：未注册插件的语言代码块在 Markdown 中会原样保留（除非有正则兜底模板）。
+
+5. **块定界标记不支持嵌套**：`@internal-start` / `@internal-end` 采用单层闭区间语义，内层 start 会被忽略并发出警告；未闭合或无匹配的定界行也会被忽略并警告。
 
 ---
 
@@ -774,23 +834,30 @@ python -m pytest tests/unit/test_python_plugin.py -v
 ```
 tests/
 ├── unit/                          # 单元测试
-│   ├── test_config.py             # StripConfig 测试
+│   ├── test_config.py             # StripConfig 测试（含 effective_* 派生）
 │   ├── test_result.py             # StripResult 测试
 │   ├── test_registry.py           # LanguageRegistry 测试
+│   ├── test_block_scanner.py      # 块定界扫描器测试
 │   ├── test_python_plugin.py      # PythonPlugin 测试（含 Golden 测试）
 │   ├── test_markdown_plugin.py    # MarkdownPlugin 测试（含 Golden 测试）
-│   └── test_engine.py             # StripEngine 和公共 API 测试
+│   └── test_engine.py             # StripEngine、warnings 传播与公共 API 测试
 ├── integration/
-│   └── test_cli.py                # CLI 集成测试
+│   └── test_cli.py                # CLI 集成测试（含块标记与 warnings 输出）
 ├── golden/
-│   ├── python/                    # Python Golden 测试文件
-│   └── markdown/                  # Markdown Golden 测试文件
+│   ├── python/                    # Python Golden 测试文件（含 block_* 系列）
+│   └── markdown/                  # Markdown Golden 测试文件（含 block_in_yaml）
 └── conftest.py                    # Golden 文件收集工具
 ```
 
 ---
 
 ## 后续发展方向
+
+### 已实现（v1.1）
+
+- [x] 块级定界标记（`@internal-start` / `@internal-end`），一次性过滤连续注释区域
+- [x] warnings 瞬态通道与 `StripResult.warnings` 传播，CLI `--verbose` 输出警告
+- [x] 标记字段自动派生（`docstring_marker` / `block_start_marker` / `block_end_marker` 留空时从 `line_marker` 派生）
 
 ### 短期（v0.2.x）
 
