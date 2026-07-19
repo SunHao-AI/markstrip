@@ -389,13 +389,13 @@ Pragma 指令是**有意处理指令**，与 `@internal` 标记体系互补：
 
 ### 识别规则
 
-- 文件级：扫描器（`scan_file_pragma`）检测文件首行（或首个非空行）是否为 `# markstrip: full`
+- 文件级：扫描器（`scan_file_pragma`）扫描全部行，任意位置出现 `# markstrip: full` 即生效
 - 区间级：扫描器（`scan_full_ranges`）检测所有 `# markstrip: full-start` 与 `full-end` 对，采用"首个 start 到首个 end 闭区间"语义
 - 不支持嵌套：内层 `full-start` 视为错配并忽略（输出 warning）
 
 ### 文件级 pragma 行为
 
-当文件首行为 `# markstrip: full` 时：
+当文件含 `# markstrip: full` 时：
 - `PythonPlugin.strip_selective` 跳过 selective 扫描，直接委托 `strip_full`
 - `MarkdownPlugin._fallback_strip` 检测到文件级 pragma 时，委托 `_fallback_full`（正则兜底全量删注释）
 - 区间标记冗余时输出 warning："文件级 full 已生效, 区间标记冗余"
@@ -1104,9 +1104,9 @@ def test_python_selective(input_file, expected_file):
 | YAML/Bash 注释 | `# @internal` | 单行 | `# @internal 内部配置` |
 | Markdown 嵌套代码块 | ` ``` ... ``` ` 在代码块内 | 嵌套块整体 | 整体删除 |
 | HTML 注释 | `<!-- @internal ... -->` | 整个注释 | `<!-- @internal 内部说明 -->` |
-| `# markstrip: full` | 文件级 pragma 指令 | 该文件所有注释全量删除，保留代码 |
-| `# markstrip: full-start` | 区间级 pragma 起始 | 区间内注释全量删除，保留代码 |
-| `# markstrip: full-end` | 区间级 pragma 结束 | 与 full-start 配对，闭区间 |
+| Pragma 文件级 | `# markstrip: full` | 整个文件 | 该文件所有注释全量删除，保留代码 |
+| Pragma 区间起始 | `# markstrip: full-start` | 区间内 | 区间内注释全量删除，保留代码 |
+| Pragma 区间结束 | `# markstrip: full-end` | 区间内 | 与 full-start 配对，闭区间 |
 
 ### 标记示例
 

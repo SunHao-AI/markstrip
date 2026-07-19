@@ -138,9 +138,9 @@ print(result.removed_count)    # 1
 | `@internal-docstring` | docstring 首行 | 整个 docstring | 整体删除 docstring |
 | `@internal-start` / `@internal-end` | 行注释定界对 | 块区域 | 删除两个定界行及其间的所有行（含纯注释与代码行） |
 | `<!-- @internal -->` | Markdown HTML 注释 | 整个注释 | 删除含标记的 HTML 注释 |
-| `# markstrip: full` | 文件级 pragma | 该文件所有注释全量删除，保留代码 |
-| `# markstrip: full-start` | 区间级 pragma 起始 | 区间内注释全量删除，保留代码 |
-| `# markstrip: full-end` | 区间级 pragma 结束 | 与 full-start 配对 |
+| `# markstrip: full` | 文件任意行 | 整个文件 | 该文件所有注释全量删除，保留代码 |
+| `# markstrip: full-start` | 区间起始行 | 区间内 | 区间内注释全量删除，保留代码 |
+| `# markstrip: full-end` | 区间结束行 | 区间内 | 与 full-start 配对，闭区间 |
 
 ### 示例 1：行注释过滤
 
