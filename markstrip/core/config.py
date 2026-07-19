@@ -1,6 +1,8 @@
 """清理配置。"""
 from dataclasses import dataclass, field
 
+from markstrip.core.result import MarkerLocation
+
 
 @dataclass
 class StripConfig:
@@ -19,6 +21,11 @@ class StripConfig:
         custom_markers: 自定义额外标记列表，与 line_marker 一起匹配。
         warnings: 引擎瞬态回填通道，由引擎每次调用插件前 clear()，
             插件回填，引擎复制后并入 StripResult.warnings。非用户配置。
+        markers_found: --check 模式瞬态回填通道，由引擎每次调用插件前
+            clear()，插件在删除点回填 MarkerLocation，引擎复制后并入
+            StripResult.markers_found。非用户配置。
+        check_mode: --check 模式瞬态标志，由引擎设置。True 时插件跳过
+            pragma 委托与 in_pragma 优先分支，确保所有 @internal 被扫描。
     """
     line_marker: str = "@internal"
     docstring_marker: str = ""
@@ -28,6 +35,8 @@ class StripConfig:
     preserve_todo: bool = True
     custom_markers: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    markers_found: list[MarkerLocation] = field(default_factory=list)
+    check_mode: bool = False
 
     def effective_docstring_marker(self) -> str:
         """返回实际生效的 docstring 标记（空则从 line_marker 派生）。"""
