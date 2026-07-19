@@ -1648,6 +1648,67 @@ Expected: 全部 FAIL(回填未实现)
         Returns:
             处理后的内容。
         """
+        def process_block(match: re.Match) -> str:
+            fence = match.group("fence")
+            lang = match.group("lang").lower()
+            code = match.group("code")
+
+            # 删除嵌套代码块
+            code = self._remove_nested_blocks(code)
+
+            # 委托前记录 markers_found 长度,以便切片翻译行号
+            pre_count = len(config.markers_found)
+
+            # 委托给语言插件
+            plugin = self._registry.get_plugin(lang)
+            if plugin is not None:
+                if mode == "selective":
+                    cleaned = plugin.strip_selective(code, config)
+                else:
+                    cleaned = plugin.strip_full(code, config)
+            else:
+                # 未知语言:正则兜底
+                cleaned = self._fallback_strip(code, lang, config)
+
+            # check_mode:翻译委托插件记录的相对行号为 .md 绝对行号
+            if config.check_mode:
+                new_markers = config.markers_found[pre_count:]
+                # 代码块 fence 行在 .md 中的行号(1-based)
+                block_start_in_md = content[:match.start()].count("\n") + 1
+                # 代码块内容首行 = fence 行 + 1
+                code_first_line_in_md = block_start_in_md + 1
+                for m in new_markers:
+                    m.line = code_first_line_in_md + (m.line - 1)
+
+            return f"{fence}{lang}\n{cleaned}{fence}"
+
+        return CODE_BLOCK_RE.sub(process_block, content)
+```
+
+- [ ] **Step 4: 修改 `_process_html_comments` 实现回填**
+
+修改 `_process_html_comments`,在 selective 模式下含 marker 的 HTML 注释处回填 MarkerLocation:
+
+```python
+    def _process_html_comments(
+        self,
+        content: str,
+        config: StripConfig,
+        mode: str,
+    ) -> str:
+        """处理 HTML 注释。
+
+        check_mode=True 且 selective 模式下,含 line_marker 的 HTML 注释
+        回填 MarkerLocation(.md 绝对行号)。
+
+        Args:
+            content: Markdown 内容。
+            config: 清理配置。
+            mode: "selective" 仅删除含标记的,"full" 删除所有。
+
+        Returns:
+            处理后的内容。
+        """
         if mode == "full":
             return HTML_COMMENT_RE.sub("", content)
 
@@ -2845,66 +2906,4 @@ Plan complete and saved to `docs/superpowers/plans/2026-07-19-check-mode-and-std
 
 **2. Inline Execution** - Execute tasks in this session using executing-plans, batch execution with checkpoints
 
-Which approach? "selective" 或 "full"。
-
-        Returns:
-            处理后的内容。
-        """
-
-        def process_block(match: re.Match) -> str:
-            fence = match.group("fence")
-            lang = match.group("lang").lower()
-            code = match.group("code")
-
-            # 删除嵌套代码块
-            code = self._remove_nested_blocks(code)
-
-            # 委托前记录 markers_found 长度,以便切片翻译行号
-            pre_count = len(config.markers_found)
-
-            # 委托给语言插件
-            plugin = self._registry.get_plugin(lang)
-            if plugin is not None:
-                if mode == "selective":
-                    cleaned = plugin.strip_selective(code, config)
-                else:
-                    cleaned = plugin.strip_full(code, config)
-            else:
-                # 未知语言:正则兜底
-                cleaned = self._fallback_strip(code, lang, config)
-
-            # check_mode:翻译委托插件记录的相对行号为 .md 绝对行号
-            if config.check_mode:
-                new_markers = config.markers_found[pre_count:]
-                # 代码块 fence 行在 .md 中的行号(1-based)
-                block_start_in_md = content[:match.start()].count("\n") + 1
-                # 代码块内容首行 = fence 行 + 1
-                code_first_line_in_md = block_start_in_md + 1
-                for m in new_markers:
-                    m.line = code_first_line_in_md + (m.line - 1)
-
-            return f"{fence}{lang}\n{cleaned}{fence}"
-
-        return CODE_BLOCK_RE.sub(process_block, content)
-```
-
-- [ ] **Step 4: 修改 `_process_html_comments` 实现回填**
-
-修改 `_process_html_comments`,在 selective 模式下含 marker 的 HTML 注释处回填 MarkerLocation:
-
-```python
-    def _process_html_comments(
-        self,
-        content: str,
-        config: StripConfig,
-        mode: str,
-    ) -> str:
-        """处理 HTML 注释。
-
-        check_mode=True 且 selective 模式下,含 line_marker 的 HTML 注释
-        回填 MarkerLocation(.md 绝对行号)。
-
-        Args:
-            content: Markdown 内容。
-            config: 清理配置。
-            mode:
+Which approach?
