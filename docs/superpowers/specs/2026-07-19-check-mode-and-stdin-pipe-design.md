@@ -155,7 +155,7 @@ class StripResult:
      - `(start_line, col_of_marker, "block-start", block_start_marker_text, line_preview)`
      - `(end_line, col_of_marker, "block-end", block_end_marker_text, line_preview)`
    - 列号取定界行中 marker 起始列(可由 `re.match().start()` 计算)
-   - `marker_text` 取 `config.effective_block_start_marker()` / `effective_block_end_marker()`(支持自定义 marker)
+   - `marker_text` 取 `config.effective_block_start()` / `effective_block_end()`(支持自定义 marker)
 
 2. **`_has_marker` 命中点**(COMMENT token 遍历,块外逐行分支):
    - 回填 `(tok.start[0], tok.start[1], "line", matched_marker_text, line_preview)`
