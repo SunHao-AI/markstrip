@@ -54,6 +54,7 @@ markstrip/
 │   ├── engine.py            # StripEngine: 主引擎，接受 content + options
 │   ├── config.py            # StripConfig: 标记规则配置（可自定义 marker，含 effective_* 派生）
 │   ├── block_scanner.py     # scan_blocks(): 块定界扫描纯函数，块语义唯一真理源
+│   ├── pragma_scanner.py    # scan_file_pragma() / scan_full_ranges(): pragma 指令扫描
 │   ├── result.py            # StripResult: 清理结果（cleaned_content, stats, warnings）
 │   └── errors.py            # 异常定义
 ├── languages/
@@ -144,6 +145,11 @@ Python 插件采用 **tokenize 精确定位 + 行级重组** 的混合策略。
 
 ```
 源代码
+  ↓
+Phase -1: pragma 指令检测（selective 模式入口）
+  → scan_file_pragma(lines, "#") 检测文件级 pragma → 命中则委托 strip_full，直接返回
+  → scan_full_ranges(lines, "#") 检测区间级 pragma → 生成 pragma_ranges
+  → 后续 Phase 1~4 中，COMMENT token 落在 pragma_ranges 内 → 走 full 逻辑（全量删注释保留代码），否则走 selective 逻辑
   ↓
 Phase 0: 块定界扫描
   → scan_blocks() 识别 @internal-start / @internal-end 包裹的块范围
@@ -360,6 +366,78 @@ def scan_blocks(
 | 嵌套 `start ... start ... end` | 内层 start 视为错配并忽略 + 警告 |
 | 孤立 `end`（无 start） | 忽略 + 警告 |
 | 未闭合 `start`（至 EOF） | 忽略该块 + 警告 |
+
+## Pragma 指令系统
+
+### 设计意图
+
+Pragma 指令是**有意处理指令**，与 `@internal` 标记体系互补：
+- `@internal` 标记 selective 模式下"应删除的注释"
+- pragma 指令在 selective 模式下"该文件/区间应转 full 模式"（全量删注释保留代码）
+
+典型场景：整个文件或某段代码是交付时不应包含任何注释的"clean zone"，用 pragma 一次性指令，无需逐行 `@internal`。
+
+### 语法
+
+| 指令 | 作用域 | 语义 |
+|------|--------|------|
+| `# markstrip: full` | 文件级 | 该文件所有注释全量删除（等价 `--mode full`），保留代码 |
+| `# markstrip: full-start` | 区间起始 | 区间内注释全量删除，保留代码 |
+| `# markstrip: full-end` | 区间结束 | 与 full-start 配对，闭区间语义 |
+
+指令必须独占一行（允许前导空白），格式为 `# markstrip: <directive>`。
+
+### 识别规则
+
+- 文件级：扫描器（`scan_file_pragma`）检测文件首行（或首个非空行）是否为 `# markstrip: full`
+- 区间级：扫描器（`scan_full_ranges`）检测所有 `# markstrip: full-start` 与 `full-end` 对，采用"首个 start 到首个 end 闭区间"语义
+- 不支持嵌套：内层 `full-start` 视为错配并忽略（输出 warning）
+
+### 文件级 pragma 行为
+
+当文件首行为 `# markstrip: full` 时：
+- `PythonPlugin.strip_selective` 跳过 selective 扫描，直接委托 `strip_full`
+- `MarkdownPlugin._fallback_strip` 检测到文件级 pragma 时，委托 `_fallback_full`（正则兜底全量删注释）
+- 区间标记冗余时输出 warning："文件级 full 已生效, 区间标记冗余"
+
+### 区间级 pragma 行为
+
+当文件含 `full-start` / `full-end` 对时：
+- 区间内的 COMMENT token 走 full 逻辑（全量删注释保留代码）
+- 区间外的注释走 selective 逻辑（`@internal` 过滤）
+- `BlockRange.mode = "comments"` 标识该区间仅删注释保留代码（区别于 `@internal-start/end` 块的 `mode = "all"` 整块删除）
+
+### 与 `@internal-start/end` 的区别
+
+| 维度 | `@internal-start/end` | `# markstrip: full-start/end` |
+|------|----------------------|------------------------------|
+| 删除范围 | 整块（含代码行与注释行） | 仅注释（保留代码） |
+| BlockRange.mode | `"all"` | `"comments"` |
+| 标记语义 | selective 标记 | selective 内嵌的 full 指令 |
+| 是否可嵌套 | 否 | 否 |
+
+### 错配处理
+
+- `full-end` 无匹配 `full-start` → warning "孤立的 full-end"
+- `full-start` 无匹配 `full-end` → warning "未闭合的 full-start"
+- warnings 通过 `config.warnings` 瞬态通道传播至 `StripResult.warnings`
+
+### CLI 交互矩阵
+
+| 输入 | CLI mode | 行为 |
+|------|----------|------|
+| 文件含 `# markstrip: full` | `selective`（默认） | 等价 full，输出全量删注释结果 |
+| 文件含 `# markstrip: full` | `full` | 一致（冗余无副作用） |
+| 文件含 `full-start/end` 对 | `selective` | 区间内 full，区间外 selective |
+| 文件含 `full-start/end` 对 | `full` | 一致（整个文件已 full） |
+| 文件含错配 `full-end` | 任意 | 输出 warning，忽略错配指令 |
+
+### Markdown 兜底机制
+
+`MarkdownPlugin._fallback_strip` 中：
+- 文件级 pragma 检测通过 `scan_file_pragma(lines, prefix)`
+- 命中时委托 `_fallback_full(lines, prefix, config)` 走正则兜底全量删注释
+- 区间级 pragma 通过 `scan_full_ranges(lines, prefix)` 检测，区间内走 full 逻辑
 
 ## Markdown 插件设计
 
@@ -1002,6 +1080,13 @@ def test_python_selective(input_file, expected_file):
 | warnings 传播 | 引擎不跨调用泄漏，`--verbose` 输出警告 |
 | 自定义插件注册 | 第三方插件通过 `register_plugin()` 注册 |
 | entry_points 发现 | 第三方包通过 entry_points 自动加载 |
+| `pragma_full` | 文件级 `# markstrip: full` 触发全量删注释 |
+| `pragma_range` | 区间级 `full-start`/`full-end` 区间内 full，区间外 selective |
+| `pragma_range_docstring` | 区间级 pragma 内 docstring 处理 |
+| `pragma_mismatched_end` | 孤立 `full-end` 输出 warning 且忽略 |
+| `pragma_nested` | 嵌套 `full-start` 视为错配并 warning |
+| `pragma_with_selective` | 文件级 pragma + 区间标记冗余 warning |
+| `pragma_in_yaml` | Markdown 代码块内 yaml 兜底接入 pragma |
 
 ## 注释标记规范
 
@@ -1019,6 +1104,9 @@ def test_python_selective(input_file, expected_file):
 | YAML/Bash 注释 | `# @internal` | 单行 | `# @internal 内部配置` |
 | Markdown 嵌套代码块 | ` ``` ... ``` ` 在代码块内 | 嵌套块整体 | 整体删除 |
 | HTML 注释 | `<!-- @internal ... -->` | 整个注释 | `<!-- @internal 内部说明 -->` |
+| `# markstrip: full` | 文件级 pragma 指令 | 该文件所有注释全量删除，保留代码 |
+| `# markstrip: full-start` | 区间级 pragma 起始 | 区间内注释全量删除，保留代码 |
+| `# markstrip: full-end` | 区间级 pragma 结束 | 与 full-start 配对，闭区间 |
 
 ### 标记示例
 
@@ -1142,3 +1230,4 @@ markstrip app/ --recursive --dry-run --verbose
 |------|------|----------|------|
 | 2026-07-15 | v1.0 | 初始设计文档 | Trae AI |
 | 2026-07-17 | v1.1 | 新增块级定界标记（`@internal-start`/`@internal-end`）、`block_scanner` 模块、warnings 瞬态通道与传播、标记自动派生 | Trae AI |
+| 2026-07-17 | v1.2 | 新增 pragma 指令系统（`# markstrip: full` / `full-start` / `full-end`）、`pragma_scanner` 模块、`BlockRange.mode` 字段 | Trae AI |
