@@ -3,7 +3,7 @@ import re
 
 from markstrip.core.block_scanner import scan_blocks
 from markstrip.core.config import StripConfig
-from markstrip.core.pragma_scanner import scan_file_pragma, scan_full_ranges
+from markstrip.core.pragma_scanner import scan_file_pragma
 from markstrip.core.result import MarkerLocation
 from markstrip.languages.base import LanguagePlugin
 from markstrip.languages.registry import LanguageRegistry
@@ -255,16 +255,6 @@ class MarkdownPlugin(LanguagePlugin):
         if scan_file_pragma(lines, prefix):
             return self._fallback_full(lines, prefix, config)
 
-        # pragma 区间扫描
-        pragma_scan = scan_full_ranges(lines, prefix)
-        config.warnings.extend(pragma_scan.warnings)
-        pragma_ranges = pragma_scan.ranges
-
-        def _in_pragma_range(line_num: int) -> bool:
-            return any(
-                r.start_line <= line_num <= r.end_line for r in pragma_ranges
-            )
-
         scan = scan_blocks(
             lines,
             prefix,
@@ -304,13 +294,6 @@ class MarkdownPlugin(LanguagePlugin):
             nl = _newline(line)
             body = line[:-len(nl)] if nl else line
             if _in_block_range(i):
-                if any_comment_re.match(body):
-                    continue
-                cleaned = inline_any_re.sub("", body).rstrip()
-                if cleaned:
-                    out.append(cleaned + nl)
-            elif _in_pragma_range(i):
-                # pragma 区间：full 逻辑,删注释保留代码
                 if any_comment_re.match(body):
                     continue
                 cleaned = inline_any_re.sub("", body).rstrip()
