@@ -9,6 +9,13 @@ from markstrip.languages.base import LanguagePlugin
 from markstrip.languages.registry import LanguageRegistry
 
 
+def _prefix_filename(filename: str | None, warnings: list[str]) -> list[str]:
+    """为警告信息添加文件名前缀，方便定位问题。"""
+    if not filename or not warnings:
+        return list(warnings)
+    return [f"{filename}: {w}" for w in warnings]
+
+
 class StripEngine:
     """主引擎:调度语言插件执行注释清理。
 
@@ -73,7 +80,7 @@ class StripEngine:
             cleaned_content=cleaned,
             removed_count=removed_count,
             detected_language=plugin.name,
-            warnings=list(config.warnings),
+            warnings=_prefix_filename(filename, config.warnings),
             markers_found=list(config.markers_found),
         )
 
