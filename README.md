@@ -10,6 +10,8 @@
 - [快速开始](#快速开始)
 - [标记类型详解](#标记类型详解)
 - [Pragma 指令系统](#pragma-指令系统)
+- [--check 模式](#check-模式)
+- [stdin/stdout 管道](#stdinstdout-管道)
 - [CLI 命令行使用指南](#cli-命令行使用指南)
 - [Python API 使用指南](#python-api-使用指南)
 - [配置参数完整说明](#配置参数完整说明)
@@ -60,6 +62,8 @@
 - **语法错误容错**：`tokenize` 失败时自动回退到正则匹配，不中断处理
 - **零运行时依赖**：仅使用 Python 标准库
 - **Pragma 指令式全量删注释**：`# markstrip: full` 文件级 / `full-start`/`full-end` 区间级指令
+- **CI 守门 `--check`**：扫描 @internal 标记并输出位置到 stderr，退出码 0/1
+- **stdin/stdout 管道**：`-` 占位符触发，接入 Unix 工作流
 
 ---
 
@@ -306,6 +310,60 @@ y = 2
 
 ---
 
+## --check 模式
+
+CI 守门用，扫描 `@internal` 标记并输出精确位置到 stderr，不修改文件。
+
+### 典型 CI 用法
+
+```bash
+# 在 CI 中守门：有 @internal 残留则失败
+markstrip src/ --recursive --check
+if [ $? -ne 0 ]; then
+    echo "Build failed: @internal markers found"
+    exit 1
+fi
+```
+
+### 检测范围
+
+仅 `@internal` 体系（`# markstrip:` pragma 不算违规）：
+
+- 行标记 `# @internal ...`
+- 块定界 `@internal-start` / `-end`
+- docstring 整体 `@internal-docstring` 或逐行 `@internal`
+- 自定义 marker（`--marker @private`）
+
+### 退出码
+
+| 退出码 | 含义 |
+|--------|------|
+| 0 | 无标记 |
+| 1 | 发现标记 |
+| 2 | 参数错误/路径不存在 |
+
+## stdin/stdout 管道
+
+Unix 风格管道接入。
+
+### 触发与语言检测
+
+`path` 参数传 `-` 触发 stdin 模式。语言检测优先级：
+
+1. `--language` 显式指定
+2. 内容探测（自动遍历已注册插件）
+
+### 输出流分离
+
+| 输出 | 目标流 |
+|------|--------|
+| 清理后内容 | stdout |
+| 警告 | stderr |
+| 标记列表（--check） | stderr |
+| 错误信息 | stderr |
+
+---
+
 ## CLI 命令行使用指南
 
 ### 命令格式
@@ -379,6 +437,56 @@ markstrip app/ --recursive
 |--------|------|
 | `0` | 成功 |
 | `1` | 错误（路径不存在 / 目录缺少 --recursive） |
+
+### `--check` 模式
+
+扫描文件/目录/stdin 中的 `@internal` 标记，输出详细位置到 stderr，不修改文件。退出码：0（无标记）/1（有标记）/2（参数错误）。
+
+```bash
+# 单文件检查
+markstrip src.py --check
+
+# 递归检查目录
+markstrip src/ --recursive --check
+
+# stdin 检查
+cat file.py | markstrip --check -
+
+# 自定义标记检查
+markstrip src.py --check --marker @private
+```
+
+输出示例：
+
+```
+src/main.py:12:5  @internal (line)	# @internal 使用 TensorRT
+src/main.py:45:1  @internal-start (block-start)
+src/main.py:52:1  @internal-end (block-end)
+
+Found 3 markers in 1 files
+```
+
+### stdin 管道（`-` 占位符）
+
+`path` 参数传 `-` 触发 stdin 模式：
+
+```bash
+markstrip - < file.py                       # 清理后输出到 stdout
+cat file.py | markstrip - --mode full       # 管道 + full
+cat file.py | markstrip --check -           # 管道 + check
+markstrip - -o cleaned.py < file.py         # 写入文件，stdout 空
+echo '# @internal x\ny=1' | markstrip - --language python
+```
+
+语言检测优先级：`--language` 显式 > 内容探测（`plugin.detect()`）。
+
+### 参数互斥表
+
+| 组合 | 行为 |
+|------|------|
+| `--check --mode full` | exit 2（互斥） |
+| `--check --output FILE` | exit 2（check 不写文件） |
+| `- --recursive` | exit 2（stdin 无递归） |
 
 ---
 
@@ -493,6 +601,25 @@ for r in results:
 # --- 限制扩展名 ---
 results = strip_directory("src/", extensions=[".py", ".md"])
 ```
+
+### `MarkerLocation` 与 `markers_found`
+
+`--check` 模式对应的 API 字段：
+
+```python
+from markstrip import strip, MarkerLocation
+
+result = strip(
+    "# @internal x\ny = 1\n",
+    language="python",
+    check_mode=True,
+)
+for m in result.markers_found:
+    print(f"{m.line}:{m.col} {m.marker_text} ({m.marker_type})")
+    # 输出：1:0 @internal (line)
+```
+
+`MarkerLocation` 字段：`line` / `col` / `marker_type` / `marker_text` / `content_preview`。
 
 ---
 
@@ -862,6 +989,18 @@ Python 3.10 及以上。
 
 pragma 指令（"该范围转 full"）与 @internal 标记（"这条注释应删除"）互补。pragma 用于整段无注释的 clean zone，@internal 用于精确标记单条注释。
 
+### Q14：--check 检测哪些标记？
+
+仅 `@internal` 体系（行/块/docstring 标记）。`# markstrip:` pragma 指令不算违规（是有意处理指令，非"未清理"）。块定界区间内的 collateral 代码行也不报告（不是 marker）。
+
+### Q15：--check 与 --dry-run 有什么区别？
+
+`--dry-run` 输出清理后的内容到 stdout（预览），不输出标记列表。`--check` 输出标记位置列表到 stderr，不输出清理内容。两者均不修改文件，可共存。
+
+### Q16：stdin 模式如何指定语言？
+
+用 `--language` 显式指定（如 `--language python`）；否则 markstrip 会用内容探测（`plugin.detect()`）自动判断。
+
 ---
 
 ## 已知限制
@@ -879,6 +1018,10 @@ pragma 指令（"该范围转 full"）与 @internal 标记（"这条注释应删
 6. **Pragma 不支持嵌套**：`# markstrip: full-start` 采用单层闭区间语义，内层视为错配。
 
 7. **HTML 注释不支持 pragma**：pragma 仅作用于代码注释前缀（`#`/`//`），不作用于 Markdown HTML 注释。
+
+8. **`--check` 不报告块内 collateral 代码行**：块定界区间内被连带删除的代码/普通注释行不算 marker，不报告。
+
+9. **stdin 不支持 `--recursive`**：stdin 是单流，无递归概念。
 
 ---
 
@@ -938,6 +1081,14 @@ tests/
 - [x] `pragma_scanner` 模块、`BlockRange.mode` 字段
 - [x] Python 与 Markdown 兜底接入 pragma
 
+### 已实现（v1.3）
+
+- [x] `--check` 模式（CI 守门用，扫描 @internal 标记并输出位置）
+- [x] stdin/stdout 管道（`-` 占位符触发）
+- [x] `MarkerLocation` 与 `markers_found` 瞬态通道
+- [x] `PythonPlugin.detect()` 与 `MarkdownPlugin.detect()` 内容探测
+- [x] Markdown 代码块内 markers 行号翻译为 .md 绝对行号
+
 ### 短期（v0.2.x）
 
 - [ ] 新增 JavaScript / TypeScript 插件（`tokenize` 替代方案）
@@ -951,8 +1102,6 @@ tests/
 - [ ] 新增 Rust 插件
 - [ ] 新增 Go 插件
 - [ ] 支持行内块注释标记（如 `/* @internal */` 在 JS/Java 中）
-- [ ] `--check` 模式（仅检查是否有未清理的标记，不修改文件）
-- [ ] 支持 stdin/stdout 管道模式
 
 ### 长期（v1.0）
 
