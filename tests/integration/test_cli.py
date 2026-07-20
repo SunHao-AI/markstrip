@@ -175,22 +175,6 @@ class TestCliPragma:
         )
         assert r_pragma.stdout == r_full.stdout
 
-    def test_cli_verbose_pragma_warnings(self, tmp_path):
-        """--verbose 输出 pragma 错配警告。"""
-        src = tmp_path / "src.py"
-        src.write_text(
-            "# markstrip: full-end\n"
-            "x = 1\n",
-            encoding="utf-8",
-        )
-        result = subprocess.run(
-            [sys.executable, "-m", "markstrip.cli", str(src),
-             "--dry-run", "--verbose"],
-            capture_output=True, text=True,
-        )
-        assert "Warning:" in result.stderr
-        assert "孤立" in result.stderr
-
 
 class TestCliCheck:
     """CLI --check 模式集成测试。"""

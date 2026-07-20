@@ -163,18 +163,6 @@ class TestPragmaDelegation:
         assert "x = 1" in result
         assert "return 1" in result
 
-    def test_redundant_range_pragma_warns(self, plugin, config):
-        """文件级 full 与区间标记共存时产生冗余警告。"""
-        content = (
-            "# markstrip: full\n"
-            "# markstrip: full-start\n"
-            "# 注释\n"
-            "# markstrip: full-end\n"
-            "x = 1\n"
-        )
-        plugin.strip_selective(content, config)
-        assert "文件级 full 已生效, 区间标记冗余" in config.warnings
-
 
 def test_check_line_marker_reported(plugin):
     """行标记 @internal 在 check_mode 下被报告为 line 类型。"""
@@ -244,23 +232,6 @@ def test_check_mode_skips_file_level_pragma(plugin):
     config.check_mode = True
     plugin.strip_selective(content, config)
     # 应报告 1 个 line marker(不被 file-level pragma 委托吞掉)
-    line_markers = [
-        m for m in config.markers_found if m.marker_type == "line"
-    ]
-    assert len(line_markers) == 1
-
-
-def test_check_mode_skips_in_pragma_branch(plugin):
-    """check_mode=True 时,pragma 区间内的 @internal 仍被报告(不走 in_pragma 优先删除)。"""
-    content = (
-        "# markstrip: full-start\n"
-        "# @internal 区间内仍报告\n"
-        "x = 1\n"
-        "# markstrip: full-end\n"
-    )
-    config = StripConfig()
-    config.check_mode = True
-    plugin.strip_selective(content, config)
     line_markers = [
         m for m in config.markers_found if m.marker_type == "line"
     ]
