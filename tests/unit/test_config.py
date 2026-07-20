@@ -1,5 +1,6 @@
 """StripConfig 单元测试。"""
 from markstrip.core.config import StripConfig
+from markstrip.core.result import MarkerLocation
 
 
 def test_default_config():
@@ -80,3 +81,22 @@ def test_warnings_independent():
     c2 = StripConfig()
     c1.warnings.append("x")
     assert c2.warnings == []
+
+
+def test_config_markers_found_default_empty():
+    config = StripConfig()
+    assert config.markers_found == []
+    assert config.check_mode is False
+
+
+def test_config_markers_found_transient():
+    """markers_found 是普通 list,可直接 append/clear。"""
+    config = StripConfig()
+    m = MarkerLocation(
+        line=1, col=0, marker_type="line",
+        marker_text="@internal", content_preview="x",
+    )
+    config.markers_found.append(m)
+    assert len(config.markers_found) == 1
+    config.markers_found.clear()
+    assert config.markers_found == []

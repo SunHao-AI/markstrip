@@ -54,7 +54,8 @@ markstrip/
 │   ├── engine.py            # StripEngine: 主引擎，接受 content + options
 │   ├── config.py            # StripConfig: 标记规则配置（可自定义 marker，含 effective_* 派生）
 │   ├── block_scanner.py     # scan_blocks(): 块定界扫描纯函数，块语义唯一真理源
-│   ├── result.py            # StripResult: 清理结果（cleaned_content, stats, warnings）
+│   ├── pragma_scanner.py    # scan_file_pragma() / scan_full_ranges(): pragma 指令扫描
+│   ├── result.py            # StripResult + MarkerLocation：清理结果与 --check 标记位置
 │   └── errors.py            # 异常定义
 ├── languages/
 │   ├── base.py              # LanguagePlugin: 抽象基类，定义接口契约
@@ -144,6 +145,11 @@ Python 插件采用 **tokenize 精确定位 + 行级重组** 的混合策略。
 
 ```
 源代码
+  ↓
+Phase -1: pragma 指令检测（selective 模式入口）
+  → scan_file_pragma(lines, "#") 检测文件级 pragma → 命中则委托 strip_full，直接返回
+  → scan_full_ranges(lines, "#") 检测区间级 pragma → 生成 pragma_ranges
+  → 后续 Phase 1~4 中，COMMENT token 落在 pragma_ranges 内 → 走 full 逻辑（全量删注释保留代码），否则走 selective 逻辑
   ↓
 Phase 0: 块定界扫描
   → scan_blocks() 识别 @internal-start / @internal-end 包裹的块范围
@@ -360,6 +366,78 @@ def scan_blocks(
 | 嵌套 `start ... start ... end` | 内层 start 视为错配并忽略 + 警告 |
 | 孤立 `end`（无 start） | 忽略 + 警告 |
 | 未闭合 `start`（至 EOF） | 忽略该块 + 警告 |
+
+## Pragma 指令系统
+
+### 设计意图
+
+Pragma 指令是**有意处理指令**，与 `@internal` 标记体系互补：
+- `@internal` 标记 selective 模式下"应删除的注释"
+- pragma 指令在 selective 模式下"该文件/区间应转 full 模式"（全量删注释保留代码）
+
+典型场景：整个文件或某段代码是交付时不应包含任何注释的"clean zone"，用 pragma 一次性指令，无需逐行 `@internal`。
+
+### 语法
+
+| 指令 | 作用域 | 语义 |
+|------|--------|------|
+| `# markstrip: full` | 文件级 | 该文件所有注释全量删除（等价 `--mode full`），保留代码 |
+| `# markstrip: full-start` | 区间起始 | 区间内注释全量删除，保留代码 |
+| `# markstrip: full-end` | 区间结束 | 与 full-start 配对，闭区间语义 |
+
+指令必须独占一行（允许前导空白），格式为 `# markstrip: <directive>`。
+
+### 识别规则
+
+- 文件级：扫描器（`scan_file_pragma`）扫描全部行，任意位置出现 `# markstrip: full` 即生效
+- 区间级：扫描器（`scan_full_ranges`）检测所有 `# markstrip: full-start` 与 `full-end` 对，采用"首个 start 到首个 end 闭区间"语义
+- 不支持嵌套：内层 `full-start` 视为错配并忽略（输出 warning）
+
+### 文件级 pragma 行为
+
+当文件含 `# markstrip: full` 时：
+- `PythonPlugin.strip_selective` 跳过 selective 扫描，直接委托 `strip_full`
+- `MarkdownPlugin._fallback_strip` 检测到文件级 pragma 时，委托 `_fallback_full`（正则兜底全量删注释）
+- 区间标记冗余时输出 warning："文件级 full 已生效, 区间标记冗余"
+
+### 区间级 pragma 行为
+
+当文件含 `full-start` / `full-end` 对时：
+- 区间内的 COMMENT token 走 full 逻辑（全量删注释保留代码）
+- 区间外的注释走 selective 逻辑（`@internal` 过滤）
+- `BlockRange.mode = "comments"` 标识该区间仅删注释保留代码（区别于 `@internal-start/end` 块的 `mode = "all"` 整块删除）
+
+### 与 `@internal-start/end` 的区别
+
+| 维度 | `@internal-start/end` | `# markstrip: full-start/end` |
+|------|----------------------|------------------------------|
+| 删除范围 | 整块（含代码行与注释行） | 仅注释（保留代码） |
+| BlockRange.mode | `"all"` | `"comments"` |
+| 标记语义 | selective 标记 | selective 内嵌的 full 指令 |
+| 是否可嵌套 | 否 | 否 |
+
+### 错配处理
+
+- `full-end` 无匹配 `full-start` → warning "孤立的 full-end"
+- `full-start` 无匹配 `full-end` → warning "未闭合的 full-start"
+- warnings 通过 `config.warnings` 瞬态通道传播至 `StripResult.warnings`
+
+### CLI 交互矩阵
+
+| 输入 | CLI mode | 行为 |
+|------|----------|------|
+| 文件含 `# markstrip: full` | `selective`（默认） | 等价 full，输出全量删注释结果 |
+| 文件含 `# markstrip: full` | `full` | 一致（冗余无副作用） |
+| 文件含 `full-start/end` 对 | `selective` | 区间内 full，区间外 selective |
+| 文件含 `full-start/end` 对 | `full` | 一致（整个文件已 full） |
+| 文件含错配 `full-end` | 任意 | 输出 warning，忽略错配指令 |
+
+### Markdown 兜底机制
+
+`MarkdownPlugin._fallback_strip` 中：
+- 文件级 pragma 检测通过 `scan_file_pragma(lines, prefix)`
+- 命中时委托 `_fallback_full(lines, prefix, config)` 走正则兜底全量删注释
+- 区间级 pragma 通过 `scan_full_ranges(lines, prefix)` 检测，区间内走 full 逻辑
 
 ## Markdown 插件设计
 
@@ -908,6 +986,139 @@ def _discover_entry_point_plugins() -> list[LanguagePlugin]:
 | docstring | 仅 Python 有 docstring 概念，其他语言不需要实现 docstring 逻辑 |
 | 字符串安全 | 如需精确处理（避免误删字符串中的 `#`），使用该语言的词法分析器 |
 
+## --check 模式
+
+### 触发
+
+新增 CLI flag `--check`（布尔标志），扫描文件/目录/stdin 中的 `@internal` 标记，输出详细位置列表到 stderr，退出码 0（无标记）/1（有标记）/2（参数错误）。
+
+```bash
+markstrip src.py --check                  # 单文件检查
+markstrip src/ --recursive --check         # 递归目录
+cat file.py | markstrip --check -          # stdin 检查
+```
+
+### 检测范围
+
+仅 `@internal` 体系（`# markstrip:` pragma 不算违规）：
+
+| 标记类型 | 检测条件 | 报告 |
+|---------|---------|------|
+| 行标记 | `# @internal ...` | 是（line） |
+| 块定界 | `# @internal-start` / `-end` | 是（block-start / block-end） |
+| docstring 整体 | `@internal-docstring` | 是（docstring-whole） |
+| docstring 逐行 | docstring 内 `@internal` | 是（docstring-line） |
+| 块内 collateral 代码行 | 块定界区间内代码/普通注释 | **否**（非 marker） |
+| pragma 指令 | `# markstrip:` | **否**（有意指令） |
+| 自定义 marker | `config.custom_markers` | 是 |
+
+### 输出格式
+
+输出到 stderr（便于 stdout 重定向 cleaned 内容）：
+
+```
+src/main.py:12:5  @internal (line)	# @internal 使用 TensorRT
+src/main.py:45:1  @internal-start (block-start)
+src/main.py:52:1  @internal-end (block-end)
+
+Found 3 markers in 1 files
+```
+
+格式：`{path}:{line}:{col}  {marker_text} ({marker_type})\t{content_preview}`
+
+末行汇总：`Found {N} markers in {M} files`（无标记输出 `No markers found`）
+
+### API 扩展：MarkerLocation 与 markers_found 瞬态通道
+
+复用 `warnings` 瞬态通道模式：
+
+```python
+@dataclass
+class MarkerLocation:
+    line: int              # 1-based 文件绝对行号
+    col: int               # 0-based 列号
+    marker_type: str       # line / block-start / block-end / docstring-whole / docstring-line
+    marker_text: str       # 命中的标记字符串
+    content_preview: str   # 截断至 80 字符
+```
+
+- `StripConfig.markers_found: list[MarkerLocation]` — 瞬态，引擎每次调用插件前 `clear()`
+- `StripConfig.check_mode: bool` — 瞬态，`--check` 时引擎设 True
+- `StripResult.markers_found: list[MarkerLocation]` — 引擎 `list()` 复制并入
+
+### check_mode 语义
+
+`check_mode=True` 时插件跳过两处 pragma 优化：
+- **跳过 file-level pragma 委托**：不调用 `strip_full`，继续走 selective 扫描
+- **跳过 in_pragma 优先分支**：pragma 区间内的 COMMENT 不优先按 full 删除，fall through 到 `_has_marker` 检查
+
+效果：`--check` 报告源代码中所有 `@internal` 标记，不受 pragma 影响。
+
+### Markdown 行号翻译
+
+代码块内委托插件记录的相对行号由 Markdown 插件翻译为 .md 绝对行号：
+
+```python
+block_start_in_md = content[:match.start()].count("\n") + 1
+code_first_line_in_md = block_start_in_md + 1
+for m in new_markers:
+    m.line = code_first_line_in_md + (m.line - 1)
+```
+
+### CLI 交互矩阵
+
+| 参数组合 | 行为 |
+|---------|------|
+| `--check` | 扫描，exit 0/1 |
+| `--check --recursive` | 递归目录，汇总输出 |
+| `--check --verbose` | 每文件 Processing 行 + 标记列表 |
+| `--check --mode full` | exit 2（参数冲突） |
+| `--check --output FILE` | exit 2（check 不写文件） |
+| `--check --dry-run` | 共存，均不修改文件 |
+| `--check --marker @private` | 自定义标记同步检测 |
+| `--check -` | stdin 检查 |
+
+## stdin/stdout 管道
+
+### 触发
+
+`path` 参数为 `"-"` 时进入 stdin 模式：
+
+```bash
+markstrip - < file.py                       # 基本管道
+cat file.py | markstrip - --mode full       # 管道 + full
+cat file.py | markstrip --check -           # 管道 + check
+markstrip - -o cleaned.py < file.py         # 管道 + 输出到文件
+```
+
+### 语言检测优先级
+
+stdin 模式无 filename，语言解析优先级：
+
+1. `--language` 显式指定
+2. 内容探测：遍历已注册插件，调用 `plugin.detect(content)` 返回 True 的第一个
+
+`PythonPlugin.detect()` 与 `MarkdownPlugin.detect()` 已实现启发式判断。
+
+### 输出流分离
+
+| 输出 | 目标流 |
+|------|--------|
+| cleaned_content | stdout |
+| warnings | stderr |
+| markers_found（--check） | stderr |
+| Processing 行（--verbose） | stderr |
+| 错误信息 | stderr |
+| 汇总行（--check） | stderr |
+
+### 不支持组合（报错 exit 2）
+
+| 组合 | 原因 |
+|------|------|
+| `- --recursive` | stdin 是单流，无递归 |
+| `--check --output` | check 不写文件 |
+| `--check --mode full` | check 蕴含 selective |
+
 ## 测试策略
 
 ### 测试目录结构
@@ -1002,6 +1213,32 @@ def test_python_selective(input_file, expected_file):
 | warnings 传播 | 引擎不跨调用泄漏，`--verbose` 输出警告 |
 | 自定义插件注册 | 第三方插件通过 `register_plugin()` 注册 |
 | entry_points 发现 | 第三方包通过 entry_points 自动加载 |
+| `pragma_full` | 文件级 `# markstrip: full` 触发全量删注释 |
+| `pragma_range` | 区间级 `full-start`/`full-end` 区间内 full，区间外 selective |
+| `pragma_range_docstring` | 区间级 pragma 内 docstring 处理 |
+| `pragma_mismatched_end` | 孤立 `full-end` 输出 warning 且忽略 |
+| `pragma_nested` | 嵌套 `full-start` 视为错配并 warning |
+| `pragma_with_selective` | 文件级 pragma + 区间标记冗余 warning |
+| `pragma_in_yaml` | Markdown 代码块内 yaml 兜底接入 pragma |
+| `check_line_marker` | --check 报告 line 类型 marker |
+| `check_block_markers` | --check 报告 block-start / block-end |
+| `check_docstring_whole` | --check 报告 docstring-whole |
+| `check_docstring_line` | --check 报告 docstring-line |
+| `check_custom_marker` | --check --marker @private 同步 |
+| `check_skips_file_pragma` | --check 文件级 pragma 内 @internal 仍报告 |
+| `check_skips_in_pragma_range` | --check pragma 区间内 @internal 仍报告 |
+| `check_pragma_not_reported` | --check 不报告 pragma 指令行 |
+| `check_markdown_html_comment` | --check 报告 .md HTML 注释（绝对行号） |
+| `check_markdown_code_block_translation` | --check 代码块内行号翻译为 .md 绝对行号 |
+| `cli_check_clean_exit_0` | --check 干净文件 exit 0 |
+| `cli_check_marked_exit_1` | --check 标记文件 exit 1 |
+| `cli_check_recursive_summary` | --check --recursive 汇总输出 |
+| `cli_check_conflict_mode_full` | --check --mode full exit 2 |
+| `cli_check_conflict_output` | --check --output exit 2 |
+| `cli_stdin_basic_pipe` | markstrip - < file 输出到 stdout |
+| `cli_stdin_with_language` | --language 显式指定 |
+| `cli_stdin_check_mode` | --check - stderr 输出标记 |
+| `cli_stdin_recursive_conflict` | - --recursive exit 2 |
 
 ## 注释标记规范
 
@@ -1019,6 +1256,9 @@ def test_python_selective(input_file, expected_file):
 | YAML/Bash 注释 | `# @internal` | 单行 | `# @internal 内部配置` |
 | Markdown 嵌套代码块 | ` ``` ... ``` ` 在代码块内 | 嵌套块整体 | 整体删除 |
 | HTML 注释 | `<!-- @internal ... -->` | 整个注释 | `<!-- @internal 内部说明 -->` |
+| Pragma 文件级 | `# markstrip: full` | 整个文件 | 该文件所有注释全量删除，保留代码 |
+| Pragma 区间起始 | `# markstrip: full-start` | 区间内 | 区间内注释全量删除，保留代码 |
+| Pragma 区间结束 | `# markstrip: full-end` | 区间内 | 与 full-start 配对，闭区间 |
 
 ### 标记示例
 
@@ -1142,3 +1382,5 @@ markstrip app/ --recursive --dry-run --verbose
 |------|------|----------|------|
 | 2026-07-15 | v1.0 | 初始设计文档 | Trae AI |
 | 2026-07-17 | v1.1 | 新增块级定界标记（`@internal-start`/`@internal-end`）、`block_scanner` 模块、warnings 瞬态通道与传播、标记自动派生 | Trae AI |
+| 2026-07-17 | v1.2 | 新增 pragma 指令系统（`# markstrip: full` / `full-start` / `full-end`）、`pragma_scanner` 模块、`BlockRange.mode` 字段 | Trae AI |
+| 2026-07-19 | v1.3 | 新增 `--check` 模式、stdin/stdout 管道、`MarkerLocation` 与 `markers_found` 瞬态通道 | Trae AI |

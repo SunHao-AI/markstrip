@@ -4,11 +4,11 @@ from typing import Union
 
 from markstrip.core.config import StripConfig
 from markstrip.core.engine import StripEngine
-from markstrip.core.result import StripResult
+from markstrip.core.result import MarkerLocation, StripResult
 from markstrip.languages.base import LanguagePlugin
 from markstrip.languages.registry import LanguageRegistry
 
-# 默认引擎实例（内置插件已注册）
+# 默认引擎实例(内置插件已注册)
 _default_engine = StripEngine()
 
 
@@ -19,15 +19,18 @@ def strip(
     filename: str | None = None,
     mode: str = "selective",
     config: StripConfig | None = None,
+    check_mode: bool = False,
 ) -> StripResult:
     """清理内容中的标记注释。
 
     Args:
         content: 待清理的内容。
         language: 显式指定语言标识符。
-        filename: 文件名（用于扩展名检测）。
-        mode: "selective"（标记过滤）或 "full"（全量删除）。
-        config: 清理配置，为 None 时使用默认配置。
+        filename: 文件名(用于扩展名检测)。
+        mode: "selective"(标记过滤)或 "full"(全量删除)。
+        config: 清理配置,为 None 时使用默认配置。
+        check_mode: --check 模式标志,True 时扫描所有 @internal 标记
+            到 markers_found 而不依赖 pragma 委托。
 
     Returns:
         StripResult 清理结果。
@@ -38,6 +41,7 @@ def strip(
         filename=filename,
         mode=mode,
         config=config,
+        check_mode=check_mode,
     )
 
 
@@ -47,6 +51,7 @@ def strip_file(
     mode: str = "selective",
     config: StripConfig | None = None,
     inplace: bool = False,
+    check_mode: bool = False,
 ) -> StripResult:
     """清理文件中的标记注释。
 
@@ -55,6 +60,7 @@ def strip_file(
         mode: "selective" 或 "full"。
         config: 清理配置。
         inplace: 是否原地修改文件。
+        check_mode: --check 模式标志。
 
     Returns:
         StripResult 清理结果。
@@ -62,7 +68,11 @@ def strip_file(
     path = Path(path)
     content = path.read_text(encoding="utf-8")
     result = _default_engine.strip(
-        content, filename=str(path), mode=mode, config=config
+        content,
+        filename=str(path),
+        mode=mode,
+        config=config,
+        check_mode=check_mode,
     )
     if inplace:
         path.write_text(result.cleaned_content, encoding="utf-8")
@@ -76,6 +86,7 @@ def strip_directory(
     config: StripConfig | None = None,
     extensions: list[str] | None = None,
     inplace: bool = False,
+    check_mode: bool = False,
 ) -> list[StripResult]:
     """批量清理目录下所有支持的文件。
 
@@ -85,6 +96,7 @@ def strip_directory(
         config: 清理配置。
         extensions: 限制处理的文件扩展名列表。
         inplace: 是否原地修改文件。
+        check_mode: --check 模式标志。
 
     Returns:
         每个文件的 StripResult 列表。
@@ -96,7 +108,11 @@ def strip_directory(
             if extensions and file_path.suffix not in extensions:
                 continue
             result = strip_file(
-                file_path, mode=mode, config=config, inplace=inplace
+                file_path,
+                mode=mode,
+                config=config,
+                inplace=inplace,
+                check_mode=check_mode,
             )
             results.append(result)
     return results
@@ -118,6 +134,7 @@ __all__ = [
     "register_plugin",
     "StripConfig",
     "StripResult",
+    "MarkerLocation",
     "StripEngine",
     "LanguagePlugin",
     "LanguageRegistry",

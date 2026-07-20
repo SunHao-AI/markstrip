@@ -4,6 +4,7 @@ import re
 from markstrip.core.block_scanner import scan_blocks
 from markstrip.core.config import StripConfig
 from markstrip.core.pragma_scanner import scan_file_pragma, scan_full_ranges
+from markstrip.core.result import MarkerLocation
 from markstrip.languages.base import LanguagePlugin
 from markstrip.languages.registry import LanguageRegistry
 
@@ -54,6 +55,39 @@ class MarkdownPlugin(LanguagePlugin):
     def file_extensions(self) -> list[str]:
         return [".md", ".markdown"]
 
+    def detect(self, content: str) -> bool:
+        """启发式判断内容是否为 Markdown。
+
+        识别信号:行首 `#` 标题、围栏代码块 ```、HTML 注释 `<!--`。
+
+        Args:
+            content: 待检测的内容。
+
+        Returns:
+            是否为 Markdown。
+        """
+        lines = content.splitlines()
+        if not lines:
+            return False
+        md_signals = 0
+        for line in lines:
+            stripped = line.lstrip()
+            # ATX 标题(# ~ ######)
+            if (
+                stripped.startswith("#")
+                and len(stripped) > 1
+                and stripped[1] in (" ", "")
+            ):
+                md_signals += 1
+            # 围栏代码块
+            elif stripped.startswith("```"):
+                md_signals += 1
+            # HTML 注释
+            elif "<!--" in line:
+                md_signals += 1
+        # 至少 1 个信号即判定(Markdown 特征明确)
+        return md_signals >= 1
+
     def strip_selective(
         self, content: str, config: StripConfig
     ) -> str:
@@ -84,15 +118,16 @@ class MarkdownPlugin(LanguagePlugin):
     ) -> str:
         """处理所有围栏代码块。
 
+        check_mode=True 时,委托插件回填的 markers 行号会被翻译为 .md 绝对行号。
+
         Args:
             content: Markdown 内容。
             config: 清理配置。
-            mode: "selective" 或 "full"。
+            mode: "selective" 仅删除含标记的,"full" 删除所有。
 
         Returns:
             处理后的内容。
         """
-
         def process_block(match: re.Match) -> str:
             fence = match.group("fence")
             lang = match.group("lang").lower()
@@ -101,6 +136,9 @@ class MarkdownPlugin(LanguagePlugin):
             # 删除嵌套代码块
             code = self._remove_nested_blocks(code)
 
+            # 委托前记录 markers_found 长度,以便切片翻译行号
+            pre_count = len(config.markers_found)
+
             # 委托给语言插件
             plugin = self._registry.get_plugin(lang)
             if plugin is not None:
@@ -108,10 +146,20 @@ class MarkdownPlugin(LanguagePlugin):
                     cleaned = plugin.strip_selective(code, config)
                 else:
                     cleaned = plugin.strip_full(code, config)
-                return f"{fence}{lang}\n{cleaned}{fence}"
+            else:
+                # 未知语言:正则兜底
+                cleaned = self._fallback_strip(code, lang, config)
 
-            # 未知语言：正则兜底
-            cleaned = self._fallback_strip(code, lang, config)
+            # check_mode:翻译委托插件记录的相对行号为 .md 绝对行号
+            if config.check_mode:
+                new_markers = config.markers_found[pre_count:]
+                # 代码块 fence 行在 .md 中的行号(1-based)
+                block_start_in_md = content[:match.start()].count("\n") + 1
+                # 代码块内容首行 = fence 行 + 1
+                code_first_line_in_md = block_start_in_md + 1
+                for m in new_markers:
+                    m.line = code_first_line_in_md + (m.line - 1)
+
             return f"{fence}{lang}\n{cleaned}{fence}"
 
         return CODE_BLOCK_RE.sub(process_block, content)
@@ -135,10 +183,13 @@ class MarkdownPlugin(LanguagePlugin):
     ) -> str:
         """处理 HTML 注释。
 
+        check_mode=True 且 selective 模式下,含 line_marker 的 HTML 注释
+        回填 MarkerLocation(.md 绝对行号)。
+
         Args:
             content: Markdown 内容。
             config: 清理配置。
-            mode: "selective" 仅删除含标记的，"full" 删除所有。
+            mode: "selective" 仅删除含标记的,"full" 删除所有。
 
         Returns:
             处理后的内容。
@@ -149,6 +200,27 @@ class MarkdownPlugin(LanguagePlugin):
         def filter_comment(match: re.Match) -> str:
             comment = match.group(0)
             if config.line_marker in comment:
+                # check_mode: 回填 HTML 注释 marker(.md 绝对行号)
+                if config.check_mode:
+                    block_start_in_md = (
+                        content[:match.start()].count("\n") + 1
+                    )
+                    marker_idx = comment.find(config.line_marker)
+                    # marker 起始列 = match 在所在行的列偏移 + marker 在 comment 内偏移
+                    line_start = content.rfind("\n", 0, match.start()) + 1
+                    col = (match.start() - line_start) + marker_idx
+                    # 截取 marker 所在行文本(整行)
+                    line_end = content.find("\n", match.start())
+                    if line_end == -1:
+                        line_end = len(content)
+                    line_text = content[line_start:line_end]
+                    config.markers_found.append(MarkerLocation(
+                        line=block_start_in_md,
+                        col=col,
+                        marker_type="line",
+                        marker_text=config.line_marker,
+                        content_preview=line_text.strip()[:80],
+                    ))
                 return ""
             return comment
 

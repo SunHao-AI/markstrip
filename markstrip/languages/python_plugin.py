@@ -6,6 +6,7 @@ import tokenize
 from markstrip.core.block_scanner import scan_blocks
 from markstrip.core.config import StripConfig
 from markstrip.core.pragma_scanner import scan_file_pragma, scan_full_ranges
+from markstrip.core.result import MarkerLocation
 from markstrip.languages.base import LanguagePlugin
 
 
@@ -24,11 +25,47 @@ class PythonPlugin(LanguagePlugin):
     def file_extensions(self) -> list[str]:
         return [".py", ".pyw", ".pyi"]
 
+    def detect(self, content: str) -> bool:
+        """启发式判断内容是否为 Python 源代码。
+
+        识别信号:行首 def/import/from/class/return 等关键字、
+        `#` 注释占比、`:` 行尾(代码块)。
+
+        Args:
+            content: 待检测的内容。
+
+        Returns:
+            是否为 Python 代码。
+        """
+        lines = content.splitlines()
+        if not lines:
+            return False
+        python_signals = 0
+        for line in lines:
+            stripped = line.lstrip()
+            if any(
+                stripped.startswith(kw)
+                for kw in ("def ", "import ", "from ", "class ", "return ")
+            ):
+                python_signals += 1
+            elif stripped.startswith("#"):
+                python_signals += 1
+            elif stripped.endswith(":") and not stripped.startswith("#"):
+                python_signals += 1
+        # 至少 1 个信号或占比 > 30% 才判定为 Python
+        # (小文件如 `# @internal x\ny = 1\n` 仅 1 个 # 信号,
+        # 阈值 2 会误判为 Markdown;Python 注册在 Markdown 之前,优先命中)
+        threshold = max(1, len(lines) * 0.3)
+        return python_signals >= threshold
+
     def strip_selective(self, content: str, config: StripConfig) -> str:
-        """标记式选择性过滤：仅删除含标记的注释。
+        """标记式选择性过滤:仅删除含标记的注释。
 
         支持逐行 @internal、块定界 @internal-start/-end、docstring 整体标记。
-        纯注释标记行整行移除，内联标记注释仅删注释片段保留代码。
+        纯注释标记行整行移除,内联标记注释仅删注释片段保留代码。
+
+        check_mode=True 时,跳过 file-level pragma 委托与 in_pragma 优先分支,
+        确保所有 @internal 标记被扫描回填至 config.markers_found。
 
         Args:
             content: Python 源代码内容。
@@ -38,8 +75,9 @@ class PythonPlugin(LanguagePlugin):
             清理后的内容。
         """
         lines = content.splitlines(keepends=True)
-        # 文件级 pragma 检测
-        if scan_file_pragma(lines, "#"):
+        check_mode = config.check_mode
+        # 文件级 pragma 检测(check_mode 时跳过委托,继续走 selective 扫描)
+        if not check_mode and scan_file_pragma(lines, "#"):
             # 检查区间标记冗余
             pragma_scan = scan_full_ranges(lines, "#")
             config.warnings.extend(pragma_scan.warnings)
@@ -66,6 +104,31 @@ class PythonPlugin(LanguagePlugin):
         config.warnings.extend(scan.warnings)
         block_ranges = scan.ranges
 
+        # check_mode:回填 block-start/block-end markers
+        if check_mode:
+            for r in block_ranges:
+                start_line_text = lines[r.start_line - 1]
+                end_line_text = lines[r.end_line - 1]
+                # 计算 marker 起始列(定界行中 marker 第一个字符)
+                start_col = start_line_text.find(
+                    config.effective_block_start()
+                )
+                end_col = end_line_text.find(config.effective_block_end())
+                config.markers_found.append(MarkerLocation(
+                    line=r.start_line,
+                    col=max(0, start_col),
+                    marker_type="block-start",
+                    marker_text=config.effective_block_start(),
+                    content_preview=start_line_text.strip()[:80],
+                ))
+                config.markers_found.append(MarkerLocation(
+                    line=r.end_line,
+                    col=max(0, end_col),
+                    marker_type="block-end",
+                    marker_text=config.effective_block_end(),
+                    content_preview=end_line_text.strip()[:80],
+                ))
+
         def _in_block(line_num: int) -> bool:
             return any(
                 r.start_line <= line_num <= r.end_line for r in block_ranges
@@ -86,15 +149,15 @@ class PythonPlugin(LanguagePlugin):
                 in_block = _in_block(tok.start[0])
                 in_pragma = _in_pragma_range(tok.start[0])
                 if in_block:
-                    # 块内：纯注释整行移除，内联仅删片段
+                    # 块内:纯注释整行移除,内联仅删片段
                     if self._is_whole_line_comment(tok, lines):
                         comment_removals.append((tok.start[0], 0, -1))
                     else:
                         comment_removals.append(
                             (tok.start[0], tok.start[1], tok.end[1])
                         )
-                elif in_pragma:
-                    # pragma 区间：full 逻辑,删注释保留代码
+                elif in_pragma and not check_mode:
+                    # pragma 区间(check_mode=False):full 逻辑,删注释保留代码
                     if self._is_preserved_comment(tok, config):
                         continue
                     if self._is_whole_line_comment(tok, lines):
@@ -104,22 +167,41 @@ class PythonPlugin(LanguagePlugin):
                             (tok.start[0], tok.start[1], tok.end[1])
                         )
                 elif self._has_marker(tok.string, config):
-                    # 块外逐行 @internal：纯注释整行移除，内联仅删片段
+                    # 块外逐行 @internal:纯注释整行移除,内联仅删片段
                     if self._is_whole_line_comment(tok, lines):
                         comment_removals.append((tok.start[0], 0, -1))
                     else:
                         comment_removals.append(
                             (tok.start[0], tok.start[1], tok.end[1])
                         )
+                    # check_mode:回填 line marker
+                    if check_mode:
+                        line_text = lines[tok.start[0] - 1]
+                        matched = self._matched_marker_text(
+                            tok.string, config
+                        )
+                        config.markers_found.append(MarkerLocation(
+                            line=tok.start[0],
+                            col=tok.start[1],
+                            marker_type="line",
+                            marker_text=matched,
+                            content_preview=line_text.strip()[:80],
+                        ))
+                elif in_pragma and check_mode:
+                    # pragma 区间内非 @internal 注释:check_mode 不删除不报告
+                    # (避免与"pragma 区间内全量删"的语义混淆;check_mode 跳过此分支)
+                    pass
 
             if tok.type == tokenize.STRING:
                 if self._is_docstring(tok, tokens):
                     in_pragma = _in_pragma_range(tok.start[0])
-                    if in_pragma and not config.preserve_docstrings:
+                    if in_pragma and not config.preserve_docstrings and not check_mode:
                         for line_num in range(tok.start[0], tok.end[0] + 1):
                             comment_removals.append((line_num, 0, -1))
                     else:
-                        doc_removals = self._process_docstring(tok, config, lines)
+                        doc_removals = self._process_docstring(
+                            tok, config, lines
+                        )
                         comment_removals.extend(doc_removals)
 
         # 行级重组
@@ -241,6 +323,26 @@ class PythonPlugin(LanguagePlugin):
                 return True
         return False
 
+    def _matched_marker_text(
+        self, comment_text: str, config: StripConfig
+    ) -> str:
+        """返回命中的实际 marker 字符串(用于 --check 输出)。
+
+        Args:
+            comment_text: 注释文本(含 # 前缀)。
+            config: 清理配置。
+
+        Returns:
+            命中的 marker 字符串(line_marker 或 custom_markers 之一)。
+            未命中时返回 config.line_marker(兜底,不应发生)。
+        """
+        markers = [config.line_marker] + config.custom_markers
+        stripped = comment_text.lstrip("#").strip()
+        for marker in markers:
+            if stripped.startswith(marker):
+                return marker
+        return config.line_marker
+
     def _is_docstring(
         self,
         tok: tokenize.TokenInfo,
@@ -290,7 +392,10 @@ class PythonPlugin(LanguagePlugin):
         config: StripConfig,
         lines: list[str],
     ) -> list[tuple[int, int, int]]:
-        """处理单个 docstring，返回需删除的位置。
+        """处理单个 docstring,返回需删除的位置。
+
+        check_mode=True 时,同时回填 docstring-whole / docstring-line marker
+        至 config.markers_found。
 
         Args:
             tok: docstring 的 STRING token。
@@ -299,7 +404,7 @@ class PythonPlugin(LanguagePlugin):
 
         Returns:
             需要删除的 (line_num, start_col, end_col) 列表。
-            end_col=-1 表示删除整行（含换行符）。
+            end_col=-1 表示删除整行(含换行符)。
         """
         try:
             content = ast.literal_eval(tok.string)
@@ -308,7 +413,7 @@ class PythonPlugin(LanguagePlugin):
 
         doc_lines = content.split("\n")
 
-        # 检查整体 docstring 标记（整段删除）
+        # 检查整体 docstring 标记(整段删除)
         docstring_marker = config.effective_docstring_marker()
         has_whole_marker = any(
             line.strip().startswith(docstring_marker)
@@ -318,9 +423,19 @@ class PythonPlugin(LanguagePlugin):
             removals = []
             for line_num in range(tok.start[0], tok.end[0] + 1):
                 removals.append((line_num, 0, -1))
+            # check_mode 回填 docstring-whole
+            if config.check_mode:
+                first_line_text = lines[tok.start[0] - 1]
+                config.markers_found.append(MarkerLocation(
+                    line=tok.start[0],
+                    col=0,
+                    marker_type="docstring-whole",
+                    marker_text=docstring_marker,
+                    content_preview=first_line_text.strip()[:80],
+                ))
             return removals
 
-        # 逐行检查行级标记（整行移除，不留空行）
+        # 逐行检查行级标记(整行移除,不留空行)
         markers = [config.line_marker] + config.custom_markers
         block_delims = {
             config.effective_block_start(),
@@ -335,8 +450,18 @@ class PythonPlugin(LanguagePlugin):
             for marker in markers:
                 if stripped.startswith(marker):
                     source_line = tok.start[0] + i
-                    # 整行移除（含换行符）
+                    # 整行移除(含换行符)
                     removals.append((source_line, 0, -1))
+                    # check_mode 回填 docstring-line
+                    if config.check_mode:
+                        line_text = lines[source_line - 1]
+                        config.markers_found.append(MarkerLocation(
+                            line=source_line,
+                            col=0,
+                            marker_type="docstring-line",
+                            marker_text=marker,
+                            content_preview=line_text.strip()[:80],
+                        ))
                     break
 
         return removals
@@ -419,12 +544,15 @@ class PythonPlugin(LanguagePlugin):
     ) -> str:
         """tokenize 失败时的正则回退。
 
-        注意：正则无法区分字符串中的 # 和注释 #，此为已知限制。
-        仅在 tokenize 失败（语法错误）时触发。
+        注意:正则无法区分字符串中的 # 和注释 #,此为已知限制。
+        仅在 tokenize 失败(语法错误)时触发。
 
-        逐行 @internal 与块内删除语义一致：纯注释行整行移除（不留空行），
-        内联注释仅删片段保留代码。marker 正则要求标记后为空白/行尾，
+        逐行 @internal 与块内删除语义一致:纯注释行整行移除(不留空行),
+        内联注释仅删片段保留代码。marker 正则要求标记后为空白/行尾,
         自动排除块定界行与 @internalized 等伪前缀。
+
+        check_mode=True 时,跳过 file-level pragma 委托与 in_pragma 优先分支,
+        回填 markers_found 与 strip_selective 一致。
 
         Args:
             content: 源代码内容。
@@ -434,8 +562,9 @@ class PythonPlugin(LanguagePlugin):
             清理后的内容。
         """
         lines = content.splitlines(keepends=True)
-        # 文件级 pragma → 委托 strip_full
-        if scan_file_pragma(lines, "#"):
+        check_mode = config.check_mode
+        # 文件级 pragma → 委托 strip_full(check_mode 时跳过)
+        if not check_mode and scan_file_pragma(lines, "#"):
             return self.strip_full(content, config)
         scan = scan_blocks(
             lines,
@@ -445,6 +574,30 @@ class PythonPlugin(LanguagePlugin):
         )
         config.warnings.extend(scan.warnings)
 
+        # check_mode:回填 block-start/block-end
+        if check_mode:
+            for r in scan.ranges:
+                start_line_text = lines[r.start_line - 1]
+                end_line_text = lines[r.end_line - 1]
+                start_col = start_line_text.find(
+                    config.effective_block_start()
+                )
+                end_col = end_line_text.find(config.effective_block_end())
+                config.markers_found.append(MarkerLocation(
+                    line=r.start_line,
+                    col=max(0, start_col),
+                    marker_type="block-start",
+                    marker_text=config.effective_block_start(),
+                    content_preview=start_line_text.strip()[:80],
+                ))
+                config.markers_found.append(MarkerLocation(
+                    line=r.end_line,
+                    col=max(0, end_col),
+                    marker_type="block-end",
+                    marker_text=config.effective_block_end(),
+                    content_preview=end_line_text.strip()[:80],
+                ))
+
         # pragma 区间扫描
         pragma_scan = scan_full_ranges(lines, "#")
         config.warnings.extend(pragma_scan.warnings)
@@ -452,7 +605,7 @@ class PythonPlugin(LanguagePlugin):
 
         markers = [config.line_marker] + config.custom_markers
         marker_alt = "|".join(re.escape(m) for m in markers)
-        # marker 后须空白或行尾：排除定界行与伪前缀
+        # marker 后须空白或行尾:排除定界行与伪前缀
         full_re = re.compile(rf"^\s*#\s*(?:{marker_alt})(?:\s|$).*")
         inline_re = re.compile(rf"\s*#\s*(?:{marker_alt})(?:\s|$).*$")
         any_comment_re = re.compile(r"^\s*#")
@@ -483,22 +636,42 @@ class PythonPlugin(LanguagePlugin):
             nl = _newline(line)
             body = line[:-len(nl)] if nl else line
             if _in_block_range(i):
-                # 块内：纯注释行整行丢弃；否则删内联注释片段保留代码
+                # 块内:纯注释行整行丢弃;否则删内联注释片段保留代码
                 if any_comment_re.match(body):
                     continue
                 cleaned = inline_any_re.sub("", body).rstrip()
                 if cleaned:
                     out.append(cleaned + nl)
-            elif _in_pragma_range(i):
-                # pragma 区间：full 逻辑,删注释保留代码
+            elif _in_pragma_range(i) and not check_mode:
+                # pragma 区间(check_mode=False):full 逻辑,删注释保留代码
                 if any_comment_re.match(body):
                     continue
                 cleaned = inline_any_re.sub("", body).rstrip()
                 if cleaned:
                     out.append(cleaned + nl)
             else:
-                # 块外：逐行 @internal（marker 边界已排除定界行）
+                # 块外 / check_mode 下 pragma 区间外:逐行 @internal
                 if full_re.match(body):
+                    # check_mode 回填 line marker
+                    if check_mode:
+                        matched = self._matched_marker_text(
+                            "#" + body.lstrip("#").lstrip(), config
+                        )
+                        # 重新解析 marker 起始列
+                        col = body.find("#") + 1  # 跳过 #
+                        # 找到 marker 在 body 中的位置
+                        for m in markers:
+                            idx = body.find(m)
+                            if idx >= 0:
+                                col = idx
+                                break
+                        config.markers_found.append(MarkerLocation(
+                            line=i,
+                            col=col,
+                            marker_type="line",
+                            marker_text=matched,
+                            content_preview=body.strip()[:80],
+                        ))
                     continue
                 cleaned = inline_re.sub("", body)
                 if cleaned.strip() == "":

@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from markstrip.core.config import StripConfig
+from markstrip.core.result import MarkerLocation
 from markstrip.languages.python_plugin import PythonPlugin
 from tests.conftest import collect_golden_cases
 
@@ -173,3 +174,154 @@ class TestPragmaDelegation:
         )
         plugin.strip_selective(content, config)
         assert "文件级 full 已生效, 区间标记冗余" in config.warnings
+
+
+def test_check_line_marker_reported(plugin):
+    """行标记 @internal 在 check_mode 下被报告为 line 类型。"""
+    config = StripConfig()
+    config.check_mode = True
+    plugin.strip_selective("# @internal 使用 TRT\nx = 1\n", config)
+    assert len(config.markers_found) == 1
+    m = config.markers_found[0]
+    assert m.marker_type == "line"
+    assert m.marker_text == "@internal"
+    assert m.line == 1
+    assert m.col == 0  # 顶格注释,col=0
+
+
+def test_check_block_markers_reported(plugin):
+    """块定界 @internal-start/-end 在 check_mode 下被报告为 block-start/block-end。"""
+    config = StripConfig()
+    config.check_mode = True
+    plugin.strip_selective(
+        "# @internal-start\n# inside\nx = 1\n# @internal-end\n",
+        config,
+    )
+    types = [m.marker_type for m in config.markers_found]
+    assert "block-start" in types
+    assert "block-end" in types
+    # 块内 collateral 代码行不报告
+    assert len(config.markers_found) == 2
+
+
+def test_check_docstring_whole_reported(plugin):
+    """docstring 含 @internal-docstring 整体标记,在 check_mode 下报告 docstring-whole。"""
+    content = 'def f():\n    """\n    @internal-docstring\n    """\n    return 1\n'
+    config = StripConfig()
+    config.check_mode = True
+    plugin.strip_selective(content, config)
+    types = [m.marker_type for m in config.markers_found]
+    assert "docstring-whole" in types
+
+
+def test_check_docstring_line_reported(plugin):
+    """docstring 内行首 @internal,在 check_mode 下报告 docstring-line。"""
+    content = 'def f():\n    """\n    @internal 逐行\n    other\n    """\n    return 1\n'
+    config = StripConfig()
+    config.check_mode = True
+    plugin.strip_selective(content, config)
+    types = [m.marker_type for m in config.markers_found]
+    assert "docstring-line" in types
+
+
+def test_check_custom_marker_reported(plugin):
+    """自定义 marker 在 check_mode 下同步报告。"""
+    config = StripConfig(line_marker="@private")
+    config.check_mode = True
+    plugin.strip_selective("# @private x\ny = 1\n", config)
+    assert len(config.markers_found) == 1
+    assert config.markers_found[0].marker_text == "@private"
+
+
+def test_check_mode_skips_file_level_pragma(plugin):
+    """check_mode=True 时,文件级 pragma 不委托 strip_full,@internal 仍被报告。"""
+    content = (
+        "# markstrip: full\n"
+        "# @internal 这条仍要报告\n"
+        "x = 1\n"
+    )
+    config = StripConfig()
+    config.check_mode = True
+    plugin.strip_selective(content, config)
+    # 应报告 1 个 line marker(不被 file-level pragma 委托吞掉)
+    line_markers = [
+        m for m in config.markers_found if m.marker_type == "line"
+    ]
+    assert len(line_markers) == 1
+
+
+def test_check_mode_skips_in_pragma_branch(plugin):
+    """check_mode=True 时,pragma 区间内的 @internal 仍被报告(不走 in_pragma 优先删除)。"""
+    content = (
+        "# markstrip: full-start\n"
+        "# @internal 区间内仍报告\n"
+        "x = 1\n"
+        "# markstrip: full-end\n"
+    )
+    config = StripConfig()
+    config.check_mode = True
+    plugin.strip_selective(content, config)
+    line_markers = [
+        m for m in config.markers_found if m.marker_type == "line"
+    ]
+    assert len(line_markers) == 1
+
+
+def test_check_mode_pragma_not_reported(plugin):
+    """pragma 指令本身不算违规,markers_found 不含 pragma 行。"""
+    content = (
+        "# markstrip: full\n"
+        "x = 1\n"
+    )
+    config = StripConfig()
+    config.check_mode = True
+    plugin.strip_selective(content, config)
+    assert config.markers_found == []
+
+
+def test_check_mode_off_pragma_works(plugin):
+    """check_mode=False(默认),pragma 正常生效,@internal 不报告(行为不变)。"""
+    content = (
+        "# markstrip: full\n"
+        "# @internal 这条会被 pragma 委托的 strip_full 删掉,不报告\n"
+        "x = 1\n"
+    )
+    config = StripConfig()
+    config.check_mode = False
+    plugin.strip_selective(content, config)
+    assert config.markers_found == []
+
+
+def test_content_preview_truncated(plugin):
+    """content_preview 截断至 80 字符。"""
+    long_line = "# @internal " + "x" * 200
+    config = StripConfig()
+    config.check_mode = True
+    plugin.strip_selective(long_line + "\n", config)
+    assert len(config.markers_found) == 1
+    assert len(config.markers_found[0].content_preview) <= 80
+
+
+def test_check_fallback_line_marker_reported():
+    """tokenize 失败(语法错误)时,_fallback_regex_selective 仍回填 markers。"""
+    # 语法错误代码:未闭合字符串字面量导致 tokenize 失败
+    content = 'x = "abc\n# @internal x\ny = 1\n'
+    config = StripConfig()
+    config.check_mode = True
+    plugin = PythonPlugin()
+    plugin.strip_selective(content, config)
+    line_markers = [
+        m for m in config.markers_found if m.marker_type == "line"
+    ]
+    assert len(line_markers) == 1
+
+
+def test_python_detect_typical_code(plugin):
+    """典型 Python 代码应被识别。"""
+    content = "import os\n\ndef f():\n    return 1\n"
+    assert plugin.detect(content) is True
+
+
+def test_python_detect_rejects_plain_text(plugin):
+    """纯文本不应被识别为 Python。"""
+    assert plugin.detect("just some text\n") is False
