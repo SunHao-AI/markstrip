@@ -52,8 +52,10 @@ class PythonPlugin(LanguagePlugin):
                 python_signals += 1
             elif stripped.endswith(":") and not stripped.startswith("#"):
                 python_signals += 1
-        # 至少 2 个信号或占比 > 30% 才判定为 Python
-        threshold = max(2, len(lines) * 0.3)
+        # 至少 1 个信号或占比 > 30% 才判定为 Python
+        # (小文件如 `# @internal x\ny = 1\n` 仅 1 个 # 信号,
+        # 阈值 2 会误判为 Markdown;Python 注册在 Markdown 之前,优先命中)
+        threshold = max(1, len(lines) * 0.3)
         return python_signals >= threshold
 
     def strip_selective(self, content: str, config: StripConfig) -> str:
