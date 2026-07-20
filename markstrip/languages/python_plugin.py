@@ -5,7 +5,7 @@ import tokenize
 
 from markstrip.core.block_scanner import scan_blocks
 from markstrip.core.config import StripConfig
-from markstrip.core.pragma_scanner import scan_file_pragma, scan_full_ranges
+from markstrip.core.pragma_scanner import scan_file_pragma
 from markstrip.core.result import MarkerLocation
 from markstrip.languages.base import LanguagePlugin
 
@@ -64,7 +64,7 @@ class PythonPlugin(LanguagePlugin):
         支持逐行 @internal、块定界 @internal-start/-end、docstring 整体标记。
         纯注释标记行整行移除,内联标记注释仅删注释片段保留代码。
 
-        check_mode=True 时,跳过 file-level pragma 委托与 in_pragma 优先分支,
+        check_mode=True 时,跳过 file-level pragma 委托,
         确保所有 @internal 标记被扫描回填至 config.markers_found。
 
         Args:
@@ -78,11 +78,6 @@ class PythonPlugin(LanguagePlugin):
         check_mode = config.check_mode
         # 文件级 pragma 检测(check_mode 时跳过委托,继续走 selective 扫描)
         if not check_mode and scan_file_pragma(lines, "#"):
-            # 检查区间标记冗余
-            pragma_scan = scan_full_ranges(lines, "#")
-            config.warnings.extend(pragma_scan.warnings)
-            if pragma_scan.ranges:
-                config.warnings.append("文件级 full 已生效, 区间标记冗余")
             return self.strip_full(content, config)
         comment_removals: list[tuple[int, int, int]] = []
 
@@ -134,32 +129,11 @@ class PythonPlugin(LanguagePlugin):
                 r.start_line <= line_num <= r.end_line for r in block_ranges
             )
 
-        # pragma 区间扫描
-        pragma_scan = scan_full_ranges(lines, "#")
-        config.warnings.extend(pragma_scan.warnings)
-        pragma_ranges = pragma_scan.ranges
-
-        def _in_pragma_range(line_num: int) -> bool:
-            return any(
-                r.start_line <= line_num <= r.end_line for r in pragma_ranges
-            )
-
         for tok in tokens:
             if tok.type == tokenize.COMMENT:
                 in_block = _in_block(tok.start[0])
-                in_pragma = _in_pragma_range(tok.start[0])
                 if in_block:
                     # 块内:纯注释整行移除,内联仅删片段
-                    if self._is_whole_line_comment(tok, lines):
-                        comment_removals.append((tok.start[0], 0, -1))
-                    else:
-                        comment_removals.append(
-                            (tok.start[0], tok.start[1], tok.end[1])
-                        )
-                elif in_pragma and not check_mode:
-                    # pragma 区间(check_mode=False):full 逻辑,删注释保留代码
-                    if self._is_preserved_comment(tok, config):
-                        continue
                     if self._is_whole_line_comment(tok, lines):
                         comment_removals.append((tok.start[0], 0, -1))
                     else:
@@ -187,22 +161,13 @@ class PythonPlugin(LanguagePlugin):
                             marker_text=matched,
                             content_preview=line_text.strip()[:80],
                         ))
-                elif in_pragma and check_mode:
-                    # pragma 区间内非 @internal 注释:check_mode 不删除不报告
-                    # (避免与"pragma 区间内全量删"的语义混淆;check_mode 跳过此分支)
-                    pass
 
             if tok.type == tokenize.STRING:
                 if self._is_docstring(tok, tokens):
-                    in_pragma = _in_pragma_range(tok.start[0])
-                    if in_pragma and not config.preserve_docstrings and not check_mode:
-                        for line_num in range(tok.start[0], tok.end[0] + 1):
-                            comment_removals.append((line_num, 0, -1))
-                    else:
-                        doc_removals = self._process_docstring(
-                            tok, config, lines
-                        )
-                        comment_removals.extend(doc_removals)
+                    doc_removals = self._process_docstring(
+                        tok, config, lines
+                    )
+                    comment_removals.extend(doc_removals)
 
         # 行级重组
         return self._rebuild(lines, comment_removals)
@@ -551,7 +516,7 @@ class PythonPlugin(LanguagePlugin):
         内联注释仅删片段保留代码。marker 正则要求标记后为空白/行尾,
         自动排除块定界行与 @internalized 等伪前缀。
 
-        check_mode=True 时,跳过 file-level pragma 委托与 in_pragma 优先分支,
+        check_mode=True 时,跳过 file-level pragma 委托,
         回填 markers_found 与 strip_selective 一致。
 
         Args:
@@ -598,11 +563,6 @@ class PythonPlugin(LanguagePlugin):
                     content_preview=end_line_text.strip()[:80],
                 ))
 
-        # pragma 区间扫描
-        pragma_scan = scan_full_ranges(lines, "#")
-        config.warnings.extend(pragma_scan.warnings)
-        pragma_ranges = pragma_scan.ranges
-
         markers = [config.line_marker] + config.custom_markers
         marker_alt = "|".join(re.escape(m) for m in markers)
         # marker 后须空白或行尾:排除定界行与伪前缀
@@ -627,11 +587,6 @@ class PythonPlugin(LanguagePlugin):
                 cur = next(block_iter, None)
             return cur is not None and cur.start_line <= line_num <= cur.end_line
 
-        def _in_pragma_range(line_num: int) -> bool:
-            return any(
-                r.start_line <= line_num <= r.end_line for r in pragma_ranges
-            )
-
         for i, line in enumerate(lines, 1):
             nl = _newline(line)
             body = line[:-len(nl)] if nl else line
@@ -642,15 +597,8 @@ class PythonPlugin(LanguagePlugin):
                 cleaned = inline_any_re.sub("", body).rstrip()
                 if cleaned:
                     out.append(cleaned + nl)
-            elif _in_pragma_range(i) and not check_mode:
-                # pragma 区间(check_mode=False):full 逻辑,删注释保留代码
-                if any_comment_re.match(body):
-                    continue
-                cleaned = inline_any_re.sub("", body).rstrip()
-                if cleaned:
-                    out.append(cleaned + nl)
             else:
-                # 块外 / check_mode 下 pragma 区间外:逐行 @internal
+                # 块外:逐行 @internal
                 if full_re.match(body):
                     # check_mode 回填 line marker
                     if check_mode:
