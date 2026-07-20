@@ -25,6 +25,37 @@ class PythonPlugin(LanguagePlugin):
     def file_extensions(self) -> list[str]:
         return [".py", ".pyw", ".pyi"]
 
+    def detect(self, content: str) -> bool:
+        """启发式判断内容是否为 Python 源代码。
+
+        识别信号:行首 def/import/from/class/return 等关键字、
+        `#` 注释占比、`:` 行尾(代码块)。
+
+        Args:
+            content: 待检测的内容。
+
+        Returns:
+            是否为 Python 代码。
+        """
+        lines = content.splitlines()
+        if not lines:
+            return False
+        python_signals = 0
+        for line in lines:
+            stripped = line.lstrip()
+            if any(
+                stripped.startswith(kw)
+                for kw in ("def ", "import ", "from ", "class ", "return ")
+            ):
+                python_signals += 1
+            elif stripped.startswith("#"):
+                python_signals += 1
+            elif stripped.endswith(":") and not stripped.startswith("#"):
+                python_signals += 1
+        # 至少 2 个信号或占比 > 30% 才判定为 Python
+        threshold = max(2, len(lines) * 0.3)
+        return python_signals >= threshold
+
     def strip_selective(self, content: str, config: StripConfig) -> str:
         """标记式选择性过滤:仅删除含标记的注释。
 

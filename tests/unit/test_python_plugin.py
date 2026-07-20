@@ -314,3 +314,14 @@ def test_check_fallback_line_marker_reported():
         m for m in config.markers_found if m.marker_type == "line"
     ]
     assert len(line_markers) == 1
+
+
+def test_python_detect_typical_code(plugin):
+    """典型 Python 代码应被识别。"""
+    content = "import os\n\ndef f():\n    return 1\n"
+    assert plugin.detect(content) is True
+
+
+def test_python_detect_rejects_plain_text(plugin):
+    """纯文本不应被识别为 Python。"""
+    assert plugin.detect("just some text\n") is False

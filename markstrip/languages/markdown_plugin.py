@@ -55,6 +55,39 @@ class MarkdownPlugin(LanguagePlugin):
     def file_extensions(self) -> list[str]:
         return [".md", ".markdown"]
 
+    def detect(self, content: str) -> bool:
+        """启发式判断内容是否为 Markdown。
+
+        识别信号:行首 `#` 标题、围栏代码块 ```、HTML 注释 `<!--`。
+
+        Args:
+            content: 待检测的内容。
+
+        Returns:
+            是否为 Markdown。
+        """
+        lines = content.splitlines()
+        if not lines:
+            return False
+        md_signals = 0
+        for line in lines:
+            stripped = line.lstrip()
+            # ATX 标题(# ~ ######)
+            if (
+                stripped.startswith("#")
+                and len(stripped) > 1
+                and stripped[1] in (" ", "")
+            ):
+                md_signals += 1
+            # 围栏代码块
+            elif stripped.startswith("```"):
+                md_signals += 1
+            # HTML 注释
+            elif "<!--" in line:
+                md_signals += 1
+        # 至少 1 个信号即判定(Markdown 特征明确)
+        return md_signals >= 1
+
     def strip_selective(
         self, content: str, config: StripConfig
     ) -> str:

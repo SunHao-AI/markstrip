@@ -124,3 +124,15 @@ def test_check_html_comment_col_position(plugin):
     # marker_text @internal 在 "<!-- " 之后,即 col=6
     m = config.markers_found[0]
     assert m.marker_text == "@internal"
+
+
+def test_markdown_detect_typical(plugin):
+    """典型 Markdown 应被识别。"""
+    content = "# Title\n\nSome text.\n\n```python\ncode\n```\n"
+    assert plugin.detect(content) is True
+
+
+def test_markdown_detect_rejects_python(plugin):
+    """纯 Python 代码不应被识别为 Markdown。"""
+    content = "import os\n\ndef f():\n    return 1\n"
+    assert plugin.detect(content) is False
