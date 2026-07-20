@@ -61,7 +61,7 @@
 - **插件架构**：内置 Python 和 Markdown 插件，支持自定义插件和 `entry_points` 自动发现
 - **语法错误容错**：`tokenize` 失败时自动回退到正则匹配，不中断处理
 - **零运行时依赖**：仅使用 Python 标准库
-- **Pragma 指令式全量删注释**：`# markstrip: full` 文件级 / `full-start`/`full-end` 区间级指令
+- **Pragma 指令式全量删注释**：`# markstrip: full` 文件级全量删除指令
 - **CI 守门 `--check`**：扫描 @internal 标记并输出位置到 stderr，退出码 0/1
 - **stdin/stdout 管道**：`-` 占位符触发，接入 Unix 工作流
 
@@ -140,11 +140,9 @@ print(result.removed_count)    # 1
 | `@internal` | 行注释 `# @internal` | 单行 | 删除该注释行，或删除行尾注释部分 |
 | `@internal` | docstring 内行首 | docstring 内单行 | 整行删除该标记行 |
 | `@internal-docstring` | docstring 首行 | 整个 docstring | 整体删除 docstring |
-| `@internal-start` / `@internal-end` | 行注释定界对 | 块区域 | 删除两个定界行及其间的所有行（含纯注释与代码行） |
+| `@internal-start` / `@internal-end` | 行注释定界对 | 块区域 | 删除两个定界行及其间的所有注释（纯注释整行删除，行尾注释仅删注释部分），保留代码行 |
 | `<!-- @internal -->` | Markdown HTML 注释 | 整个注释 | 删除含标记的 HTML 注释 |
 | `# markstrip: full` | 文件任意行 | 整个文件 | 该文件所有注释全量删除，保留代码 |
-| `# markstrip: full-start` | 区间起始行 | 区间内 | 区间内注释全量删除，保留代码 |
-| `# markstrip: full-end` | 区间结束行 | 区间内 | 与 full-start 配对，闭区间 |
 
 ### 示例 1：行注释过滤
 
@@ -271,20 +269,6 @@ import os
 x = 1  # 行尾注释也会被删除
 ```
 
-区间级（区间内全量删注释，区间外保留 selective）：
-
-```python
-# markstrip: full-start
-# 这段代码内的所有注释都会被删除
-def f():
-    # 包括这条
-    return 1
-# markstrip: full-end
-
-# @internal 这条仍按 selective 标记处理
-y = 2
-```
-
 ### 与 @internal 的关系
 
 | 维度 | `@internal` 标记 | `# markstrip:` pragma |
@@ -300,11 +284,9 @@ y = 2
 |------|----------|------|
 | 文件含 `# markstrip: full` | selective | 等价 full，全量删注释 |
 | 文件含 `# markstrip: full` | full | 一致（冗余） |
-| 区间 `full-start/end` | selective | 区间内 full，外 selective |
 
 ### FAQ
 
-- **pragma 是否支持嵌套**：不支持。内层 `full-start` 视为错配，输出 warning 后忽略。
 - **release 文件该用 pragma 还是 @internal**：文件整体无注释 → 用 `# markstrip: full`；大部分注释保留、仅特定行删除 → 用 `@internal`。
 - **HTML 注释是否支持 pragma**：不支持。pragma 仅作用于 `#` / `//` 前缀的代码注释。
 
@@ -1015,13 +997,11 @@ pragma 指令（"该范围转 full"）与 @internal 标记（"这条注释应删
 
 5. **块定界标记不支持嵌套**：`@internal-start` / `@internal-end` 采用单层闭区间语义，内层 start 会被忽略并发出警告；未闭合或无匹配的定界行也会被忽略并警告。
 
-6. **Pragma 不支持嵌套**：`# markstrip: full-start` 采用单层闭区间语义，内层视为错配。
+6. **HTML 注释不支持 pragma**：pragma 仅作用于代码注释前缀（`#`/`//`），不作用于 Markdown HTML 注释。
 
-7. **HTML 注释不支持 pragma**：pragma 仅作用于代码注释前缀（`#`/`//`），不作用于 Markdown HTML 注释。
+7. **`--check` 不报告块内 collateral 代码行**：块定界区间内被连带删除的代码/普通注释行不算 marker，不报告。
 
-8. **`--check` 不报告块内 collateral 代码行**：块定界区间内被连带删除的代码/普通注释行不算 marker，不报告。
-
-9. **stdin 不支持 `--recursive`**：stdin 是单流，无递归概念。
+8. **stdin 不支持 `--recursive`**：stdin 是单流，无递归概念。
 
 ---
 
@@ -1077,8 +1057,7 @@ tests/
 
 ### 已实现（v1.2）
 
-- [x] Pragma 指令系统（`# markstrip: full` / `full-start` / `full-end`）
-- [x] `pragma_scanner` 模块、`BlockRange.mode` 字段
+- [x] Pragma 指令系统（`# markstrip: full` 文件级全量删除）
 - [x] Python 与 Markdown 兜底接入 pragma
 
 ### 已实现（v1.3）
