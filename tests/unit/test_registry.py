@@ -1,8 +1,7 @@
 """LanguageRegistry 单元测试。"""
-import pytest
+from markstrip.core.config import StripConfig
 from markstrip.languages.base import LanguagePlugin
 from markstrip.languages.registry import LanguageRegistry
-from markstrip.core.config import StripConfig
 
 
 class FakePlugin(LanguagePlugin):

@@ -3,8 +3,8 @@
 块语义的唯一真理源。单趟扫描，严格容错，不支持嵌套：
 内层 start 视为错配并忽略 + 警告；未闭合/无匹配的定界行均忽略 + 警告。
 """
-import re
 from dataclasses import dataclass, field
+import re
 
 
 @dataclass

@@ -1,7 +1,7 @@
 """markstrip 命令行工具。"""
+from pathlib import Path
 import argparse
 import sys
-from pathlib import Path
 
 from markstrip import strip
 from markstrip.core.config import StripConfig

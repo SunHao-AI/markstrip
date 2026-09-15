@@ -1,7 +1,7 @@
 """CLI 集成测试。"""
+from pathlib import Path
 import subprocess
 import sys
-from pathlib import Path
 
 
 def run_cli(*args) -> tuple[int, str, str]:
