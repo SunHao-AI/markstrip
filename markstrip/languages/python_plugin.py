@@ -165,7 +165,7 @@ class PythonPlugin(LanguagePlugin):
             if tok.type == tokenize.STRING:
                 if self._is_docstring(tok, tokens):
                     doc_removals = self._process_docstring(
-                        tok, config, lines
+                        tok, config, lines, tokens
                     )
                     comment_removals.extend(doc_removals)
 
@@ -356,6 +356,7 @@ class PythonPlugin(LanguagePlugin):
         tok: tokenize.TokenInfo,
         config: StripConfig,
         lines: list[str],
+        tokens: list[tokenize.TokenInfo],
     ) -> list[tuple[int, int, int]]:
         """处理单个 docstring,返回需删除的位置。
 
@@ -366,6 +367,7 @@ class PythonPlugin(LanguagePlugin):
             tok: docstring 的 STRING token。
             config: 清理配置。
             lines: 原始行列表。
+            tokens: 完整 token 列表(判断 docstring 是否为块内唯一语句)。
 
         Returns:
             需要删除的 (line_num, start_col, end_col) 列表。
@@ -429,7 +431,76 @@ class PythonPlugin(LanguagePlugin):
                         ))
                     break
 
+        # 标记行全部移除后 docstring 内容为空时,会留下 `"""` / `"""` 空文档
+        # 字符串:pyarmor --mix-str 的 freeze 步骤会因此误判其后的
+        # from __future__ 位置(报 must occur at the beginning of the file),
+        # 故此处整体移除该 docstring 语句。
+        # 例外:docstring 是所在块唯一语句时保留,整体移除会造成空块语法错误。
+        removed_lines = {line_num for line_num, _, _ in removals}
+        remaining = [
+            line
+            for i, line in enumerate(doc_lines)
+            if tok.start[0] + i not in removed_lines
+        ]
+        if (
+            not any(line.strip() for line in remaining)
+            and self._starts_line(tok, lines)
+            and not self._is_only_statement(tok, tokens)
+        ):
+            return [
+                (line_num, 0, -1)
+                for line_num in range(tok.start[0], tok.end[0] + 1)
+            ]
+
         return removals
+
+    def _starts_line(
+        self, tok: tokenize.TokenInfo, lines: list[str]
+    ) -> bool:
+        """判断 token 是否独占行首(其前只有空白)。
+
+        用于区分真正的 docstring 与 `x = \"\"\"...\"\"\"` 这类内联多行字符串,
+        避免整体移除时连带删掉同一行上的代码。
+
+        Args:
+            tok: STRING token。
+            lines: 原始行列表。
+
+        Returns:
+            True 表示 token 之前仅有空白。
+        """
+        return lines[tok.start[0] - 1][: tok.start[1]].strip() == ""
+
+    def _is_only_statement(
+        self,
+        tok: tokenize.TokenInfo,
+        tokens: list[tokenize.TokenInfo],
+    ) -> bool:
+        """判断 token 是否为其所在代码块中唯一的语句。
+
+        模块顶层返回 False(整体移除后得到空文件,仍合法);
+        类/函数体内无后续语句(紧随 DEDENT)时返回 True。
+
+        Args:
+            tok: STRING token。
+            tokens: 完整 token 列表。
+
+        Returns:
+            True 表示该 token 是块内唯一语句。
+        """
+        idx = tokens.index(tok)
+        for nxt in tokens[idx + 1:]:
+            if nxt.type in (
+                tokenize.NL,
+                tokenize.NEWLINE,
+                tokenize.COMMENT,
+                tokenize.ENCODING,
+            ):
+                continue
+            if nxt.type == tokenize.ENDMARKER:
+                return False
+            return nxt.type == tokenize.DEDENT
+        return False
 
     def _rebuild(
         self,
