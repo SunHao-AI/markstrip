@@ -198,6 +198,24 @@ class TestCliCheck:
         assert "@internal" in err
         assert "(line)" in err
 
+    def test_check_docstring_block_exit_1(self, tmp_path):
+        """docstring 内块定界(无 # 前缀)--check 必须拦下(exit 1)。"""
+        test_file = tmp_path / "docblock.py"
+        test_file.write_text(
+            'def f():\n'
+            '    """摘要.\n'
+            '    @internal-start\n'
+            '    机密算法\n'
+            '    @internal-end\n'
+            '    """\n'
+            '    return 1\n',
+            encoding="utf-8",
+        )
+        code, out, err = run_cli(str(test_file), "--check")
+        assert code == 1
+        assert "(docstring-block-start)" in err
+        assert "(docstring-block-end)" in err
+
     def test_check_recursive_directory(self, tmp_path):
         """递归目录 --check 汇总输出。"""
         sub = tmp_path / "sub"

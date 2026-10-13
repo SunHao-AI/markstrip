@@ -408,12 +408,91 @@ class PythonPlugin(LanguagePlugin):
             config.effective_block_start(),
             config.effective_block_end(),
         }
+
+        # docstring 内文本块定界:行首(无 # 前缀)的 @internal-start/-end。
+        # scan_blocks 面向注释行(要求 # 前缀),docstring 内的定界行是纯文本,
+        # 须在此按相同配对语义单独处理。解码行数与源码行数一致才可行
+        # (转义 \n 会破坏行映射,此时保守跳过块处理)。
+        start_marker = config.effective_block_start()
+        end_marker = config.effective_block_end()
+        text_blocks: list[tuple[int, int]] = []
+        if len(doc_lines) == tok.end[0] - tok.start[0] + 1:
+            open_i: int | None = None
+            for i, line in enumerate(doc_lines):
+                stripped = line.strip()
+                if self._is_text_delimiter(stripped, start_marker):
+                    if open_i is not None:
+                        config.warnings.append(
+                            f"行 {tok.start[0] + i}: docstring 内嵌套"
+                            f" {start_marker},已忽略"
+                        )
+                        continue
+                    open_i = i
+                elif self._is_text_delimiter(stripped, end_marker):
+                    if open_i is None:
+                        config.warnings.append(
+                            f"行 {tok.start[0] + i}: docstring 内无匹配"
+                            f" {start_marker} 的 {end_marker},已忽略"
+                        )
+                        continue
+                    text_blocks.append((open_i, i))
+                    open_i = None
+            if open_i is not None:
+                config.warnings.append(
+                    f"行 {tok.start[0] + open_i}: docstring 内 {start_marker}"
+                    f" 缺少匹配 {end_marker},已忽略"
+                )
+
+        block_lines: set[int] = set()
+        for s, e in text_blocks:
+            block_lines.update(range(s, e + 1))
+
+        # check_mode:回填 docstring-block-start/-end
+        if config.check_mode:
+            for s, e in text_blocks:
+                s_line = tok.start[0] + s
+                e_line = tok.start[0] + e
+                s_text = lines[s_line - 1]
+                e_text = lines[e_line - 1]
+                config.markers_found.append(MarkerLocation(
+                    line=s_line,
+                    col=max(0, s_text.find(start_marker)),
+                    marker_type="docstring-block-start",
+                    marker_text=start_marker,
+                    content_preview=s_text.strip()[:80],
+                ))
+                config.markers_found.append(MarkerLocation(
+                    line=e_line,
+                    col=max(0, e_text.find(end_marker)),
+                    marker_type="docstring-block-end",
+                    marker_text=end_marker,
+                    content_preview=e_text.strip()[:80],
+                ))
+
         removals: list[tuple[int, int, int]] = []
+        line_mapped = (
+            len(doc_lines) == tok.end[0] - tok.start[0] + 1
+            and "\\" not in tok.string
+        )
+        _raw = tok.string
+        while _raw and _raw[0] in "brufBRUF":
+            _raw = _raw[1:]
+        if _raw.startswith('"""'):
+            quote_seq = '"""'
+        elif _raw.startswith("'''"):
+            quote_seq = "'''"
+        else:
+            quote_seq = _raw[0]
         for i, line in enumerate(doc_lines):
             stripped = line.strip()
-            # 排除块定界标记
+            # 配对文本块内(含定界行):整行移除
+            if i in block_lines:
+                removals.append((tok.start[0] + i, 0, -1))
+                continue
+            # 排除块定界标记(未配对定界行保留)
             if any(stripped.startswith(d) for d in block_delims):
                 continue
+            matched = False
             for marker in markers:
                 if stripped.startswith(marker):
                     source_line = tok.start[0] + i
@@ -429,14 +508,54 @@ class PythonPlugin(LanguagePlugin):
                             marker_text=marker,
                             content_preview=line_text.strip()[:80],
                         ))
+                    matched = True
                     break
+            if matched or not line_mapped:
+                continue
+            # 内联标记:删除 docstring 行内自标记起至该行 docstring 文本尾
+            # (保留标记前摘要与引号结构)。行映射成立(行数一致且无转义)
+            # 才能安全换算源码列,否则保守跳过。
+            for marker in markers:
+                idx = self._inline_marker_index(line, marker)
+                if idx < 0:
+                    continue
+                # 标记前本行含 #:视为文档示例注释行,保守不删
+                if "#" in line[:idx]:
+                    continue
+                source_line = tok.start[0] + i
+                source_text = lines[source_line - 1]
+                if i == 0:
+                    base_col = source_text.find(quote_seq) + len(quote_seq)
+                else:
+                    base_col = 0
+                start_col = base_col + idx
+                if i == len(doc_lines) - 1:
+                    end_col = source_text.rfind(quote_seq)
+                else:
+                    end_col = len(source_text.rstrip("\r\n"))
+                if start_col >= end_col:
+                    continue
+                removals.append((source_line, start_col, end_col))
+                if config.check_mode:
+                    config.markers_found.append(MarkerLocation(
+                        line=source_line,
+                        col=start_col,
+                        marker_type="docstring-line",
+                        marker_text=marker,
+                        content_preview=source_text.strip()[:80],
+                    ))
+                break
 
         # 标记行全部移除后 docstring 内容为空时,会留下 `"""` / `"""` 空文档
         # 字符串:pyarmor --mix-str 的 freeze 步骤会因此误判其后的
         # from __future__ 位置(报 must occur at the beginning of the file),
         # 故此处整体移除该 docstring 语句。
         # 例外:docstring 是所在块唯一语句时保留,整体移除会造成空块语法错误。
-        removed_lines = {line_num for line_num, _, _ in removals}
+        # 内联列级删除保留行(摘要前缀仍在),不参与"内容清空"判定,
+        # 只有整行移除才算清空来源。
+        removed_lines = {
+            line_num for line_num, _, end in removals if end == -1
+        }
         remaining = [
             line
             for i, line in enumerate(doc_lines)
@@ -453,6 +572,50 @@ class PythonPlugin(LanguagePlugin):
             ]
 
         return removals
+
+    @staticmethod
+    def _inline_marker_index(line: str, marker: str) -> int:
+        """返回 docstring 行内内联标记的起始列,无则 -1。
+
+        匹配规则:标记后须空白或行尾(排除 `@internalized` 伪前缀);
+        标记前不得是单词字符/#/@(排除 `foo@internal` 粘连、
+        `# @internal` 文档示例注释、`@@internal`),标点与空白前缀
+        (如 `摘要.@internal`)允许。
+
+        Args:
+            line: docstring 解码后的单行文本。
+            marker: 行级标记,如 "@internal"。
+
+        Returns:
+            标记在该行内的起始下标,未命中返回 -1。
+        """
+        pattern = re.compile(
+            r"(?<![\w#@])" + re.escape(marker) + r"(?=\s|$)"
+        )
+        m = pattern.search(line)
+        return m.start() if m else -1
+
+    @staticmethod
+    def _is_text_delimiter(stripped: str, marker: str) -> bool:
+        """判断 docstring 内文本行是否为块定界行(无 # 前缀)。
+
+        与 block_scanner 注释定界语义对齐:标记后须空白或行尾,
+        排除 @internal-started 伪前缀;带 # 前缀的行是文档示例注释,
+        不算作文本定界。
+
+        Args:
+            stripped: 已 strip 的行文本。
+            marker: 定界标记,如 "@internal-start"。
+
+        Returns:
+            是否为文本块定界行。
+        """
+        if stripped.startswith("#"):
+            return False
+        if not stripped.startswith(marker):
+            return False
+        rest = stripped[len(marker):]
+        return rest == "" or rest[0].isspace()
 
     def _starts_line(
         self, tok: tokenize.TokenInfo, lines: list[str]

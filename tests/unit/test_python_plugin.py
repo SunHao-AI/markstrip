@@ -212,6 +212,156 @@ def test_check_docstring_line_reported(plugin):
     assert "docstring-line" in types
 
 
+def test_docstring_block_removed_keeps_summary(plugin):
+    """docstring 内块定界 @internal-start/-end（无 # 前缀）整体删除块内容,
+    保留块外摘要与函数体代码。"""
+    content = (
+        'def f():\n'
+        '    """摘要行.\n'
+        '\n'
+        '    @internal-start\n'
+        '    机密细节 A\n'
+        '    机密细节 B\n'
+        '    @internal-end\n'
+        '    """\n'
+        '    return 1\n'
+    )
+    result = plugin.strip_selective(content, StripConfig())
+    assert "摘要行." in result
+    assert "机密细节" not in result
+    assert "@internal" not in result
+    assert "return 1" in result
+    import ast
+
+    ast.parse(result)
+
+
+def test_check_docstring_block_reported(plugin):
+    """docstring 内块定界在 check_mode 下报告 docstring-block-start/-end。"""
+    content = (
+        'def f():\n'
+        '    """摘要行.\n'
+        '    @internal-start\n'
+        '    机密\n'
+        '    @internal-end\n'
+        '    """\n'
+        '    return 1\n'
+    )
+    config = StripConfig()
+    config.check_mode = True
+    plugin.strip_selective(content, config)
+    types = [m.marker_type for m in config.markers_found]
+    assert "docstring-block-start" in types
+    assert "docstring-block-end" in types
+
+
+def test_check_docstring_block_not_reported_as_line(plugin):
+    """块内正文行不因块定界而误报为 docstring-line(避免重复上报)。"""
+    content = (
+        'def f():\n'
+        '    """摘要行.\n'
+        '    @internal-start\n'
+        '    机密正文\n'
+        '    @internal-end\n'
+        '    """\n'
+        '    return 1\n'
+    )
+    config = StripConfig()
+    config.check_mode = True
+    plugin.strip_selective(content, config)
+    line_markers = [
+        m for m in config.markers_found if m.marker_type == "docstring-line"
+    ]
+    assert line_markers == []
+
+
+def test_docstring_block_unpaired_ignored(plugin):
+    """未配对的 docstring 内 @internal-start 与注释块同容错:忽略不删。"""
+    content = (
+        'def f():\n'
+        '    """摘要行.\n'
+        '    @internal-start\n'
+        '    仍在的正文\n'
+        '    """\n'
+        '    return 1\n'
+    )
+    result = plugin.strip_selective(content, StripConfig())
+    assert "仍在的正文" in result
+    assert "摘要行." in result
+
+
+def test_docstring_block_pound_sample_not_matched(plugin):
+    """docstring 内示例注释 `# @internal-start`(带 #)不当作文本块定界,保留原样。"""
+    content = (
+        'def f():\n'
+        '    """用法示例:\n'
+        '    # @internal-start\n'
+        '    # 这是文档里的代码样例\n'
+        '    # @internal-end\n'
+        '    """\n'
+        '    return 1\n'
+    )
+    result = plugin.strip_selective(content, StripConfig())
+    assert "文档里的代码样例" in result
+
+
+def test_docstring_inline_marker_keeps_prefix(plugin):
+    """docstring 单行内联 @internal:删除标记与其后内容,保留标记前文本与闭合引号。"""
+    content = (
+        'class C:\n'
+        '    def m(self):\n'
+        '        """单会话详情(含正文).@internal 正文级读取记审计日志."""\n'
+        '        return 1\n'
+    )
+    result = plugin.strip_selective(content, StripConfig())
+    assert "单会话详情(含正文)." in result
+    assert "@internal" not in result
+    assert "审计日志" not in result
+    assert '"""单会话详情(含正文)."""' in result
+    import ast
+
+    ast.parse(result)
+
+
+def test_docstring_inline_marker_reported(plugin):
+    """内联 docstring 标记在 check_mode 下报告(不再漏网)。"""
+    content = (
+        'def f():\n'
+        '    """摘要.@internal 内部说明"""\n'
+        '    return 1\n'
+    )
+    config = StripConfig()
+    config.check_mode = True
+    plugin.strip_selective(content, config)
+    assert any(
+        m.marker_type == "docstring-line" for m in config.markers_found
+    )
+
+
+def test_docstring_inline_after_hash_not_matched(plugin):
+    """docstring 内 `# @internal ...` 示例行(标记前有 #)不当作内联标记,保留。"""
+    content = (
+        'def f():\n'
+        '    """用法:\n'
+        '    x = 1  # @internal 这是文档示例\n'
+        '    """\n'
+        '    return 1\n'
+    )
+    result = plugin.strip_selective(content, StripConfig())
+    assert "这是文档示例" in result
+
+
+def test_docstring_inline_pseudo_prefix_not_matched(plugin):
+    """内联匹配须标记后为空白/行尾:@internalized 伪前缀不误删。"""
+    content = (
+        'def f():\n'
+        '    """讲 @internalized 概念的 docstring"""\n'
+        '    return 1\n'
+    )
+    result = plugin.strip_selective(content, StripConfig())
+    assert "@internalized" in result
+
+
 def test_check_custom_marker_reported(plugin):
     """自定义 marker 在 check_mode 下同步报告。"""
     config = StripConfig(line_marker="@private")

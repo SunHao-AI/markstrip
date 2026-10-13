@@ -56,6 +56,7 @@
 - **块级定界过滤**：`@internal-start` / `@internal-end` 标记可一次性过滤连续的注释区域，含定界行整体删除
 - **Docstring 整体删除**：`@internal-docstring` 标记可整体删除整个 docstring
 - **Docstring 逐行过滤**：docstring 内逐行 `@internal` 标记仅删除对应行
+- **Docstring 内块定界**：docstring 文本中行首（无 `#` 前缀）的 `@internal-start` / `@internal-end` 定界对，删除其间全部文本行与定界行，保留块外内容
 - **Markdown 支持**：解析代码块并委托对应语言插件处理，支持嵌套代码块删除和 HTML 注释过滤
 - **全量模式**：`full` 模式删除所有注释（保留 shebang / TODO / 编码声明等）
 - **插件架构**：内置 Python 和 Markdown 插件，支持自定义插件和 `entry_points` 自动发现
@@ -139,8 +140,10 @@ print(result.removed_count)    # 1
 |------|------|--------|------|
 | `@internal` | 行注释 `# @internal` | 单行 | 删除该注释行，或删除行尾注释部分 |
 | `@internal` | docstring 内行首 | docstring 内单行 | 整行删除该标记行 |
+| `@internal` | docstring 行内（标记前无 `#`） | 该行内标记后文本 | 删除自标记起至该行文本尾的内容，保留标记前摘要与引号 |
 | `@internal-docstring` | docstring 首行 | 整个 docstring | 整体删除 docstring |
 | `@internal-start` / `@internal-end` | 行注释定界对 | 块区域 | 删除两个定界行及其间的所有注释（纯注释整行删除，行尾注释仅删注释部分），保留代码行 |
+| `@internal-start` / `@internal-end` | docstring 内行首（无 `#`） | docstring 块区域 | 整行删除两个定界行及其间全部文本行，保留块外 docstring 内容与代码 |
 | `<!-- @internal -->` | Markdown HTML 注释 | 整个注释 | 删除含标记的 HTML 注释 |
 | `# markstrip: full` | 文件任意行 | 整个文件 | 该文件所有注释全量删除，保留代码 |
 
@@ -312,7 +315,7 @@ fi
 仅 `@internal` 体系（`# markstrip:` pragma 不算违规）：
 
 - 行标记 `# @internal ...`
-- 块定界 `@internal-start` / `-end`
+- 块定界 `@internal-start` / `-end`（注释行与 docstring 内文本行两种形态均检测，后者报告为 `docstring-block-start` / `docstring-block-end`）
 - docstring 整体 `@internal-docstring` 或逐行 `@internal`
 - 自定义 marker（`--marker @private`）
 
