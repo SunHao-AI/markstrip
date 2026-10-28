@@ -86,7 +86,9 @@ class PythonPlugin(LanguagePlugin):
             tokens = list(tokenize.tokenize(
                 iter(content.encode("utf-8").splitlines(True)).__next__
             ))
-        except tokenize.TokenError:
+        except (tokenize.TokenError, SyntaxError):
+            # IndentationError / SyntaxError 同为语法错误 (tokenize 对缩进错乱
+            # 抛 IndentationError, 它是 SyntaxError 子类), 与 TokenError 一样降级到正则回退
             return self._fallback_regex_selective(content, config)
 
         # 块扫描
@@ -189,8 +191,9 @@ class PythonPlugin(LanguagePlugin):
             tokens = list(tokenize.tokenize(
                 iter(content.encode("utf-8").splitlines(True)).__next__
             ))
-        except tokenize.TokenError:
+        except (tokenize.TokenError, SyntaxError):
             # 语法错误时无法处理，直接返回原内容
+            # (tokenize 对缩进错乱抛 IndentationError, 属 SyntaxError 子类)
             return content
 
         for tok in tokens:
